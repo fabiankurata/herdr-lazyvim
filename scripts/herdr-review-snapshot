@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+repo=${1:-.}
+git_dir=$(git -C "$repo" rev-parse --absolute-git-dir)
+index="$git_dir/herdr-review-index-$$"
+
+cleanup() {
+  rm -f "$index" "$index.lock"
+}
+trap cleanup EXIT HUP INT TERM
+
+real_index="$git_dir/index"
+if [ -f "$real_index" ]; then
+  cp "$real_index" "$index"
+else
+  GIT_INDEX_FILE="$index" git -C "$repo" read-tree --empty
+fi
+
+GIT_INDEX_FILE="$index" git -C "$repo" -c core.quotepath=false add -A
+GIT_INDEX_FILE="$index" git -C "$repo" write-tree

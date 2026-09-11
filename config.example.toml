@@ -1,0 +1,59 @@
+# Placement when the active tab contains a Herdr agent.
+agent_placement = "split"
+
+# Placement when the active tab contains only terminals.
+terminal_placement = "zoomed"
+
+# Used when either placement is "split": "right" or "down".
+direction = "right"
+
+# Reuse the single editor process in this workspace.
+reuse_existing = true
+
+# "hide" parks the live editor in a background tab so its state survives.
+# Other choices are "close" and "open_only".
+toggle_behavior = "hide"
+hide_tab_label = "LazyVim"
+
+# Work around Herdr not always notifying a moved pane of its restored split size.
+# Use "none" after the upstream resize behavior is fixed.
+resize_workaround = "nudge"
+
+# Wait for Herdr's restored split layout before refreshing Neovim's PTY size.
+resize_settle_delay = "0.12"
+
+# If the focused pane is not an agent, attach beside another agent in its tab.
+prefer_agent_in_tab = true
+
+# Heal accidental duplicate editor panes by keeping one and closing the rest.
+deduplicate_existing = true
+
+# Editor executable and project argument. Both may begin with ~/.
+editor = "nvim"
+target = "."
+
+# Load the bundled review comments and review hub inside Neovim.
+review_enabled = true
+comment_completion = false
+comment_display = "card"
+
+# Range style: "subtle", "gutter", or "selection".
+comment_range_style = "subtle"
+
+# Review card shown below (or above) the commented range.
+comment_card_position = "below"
+comment_card_width = "72"
+comment_card_background = "#16161e"
+comment_card_border = "#ff9e64"
+
+# Let Alacritty's opacity show through the editor canvas and sidebars.
+transparent_background = true
+
+# Mode emphasis: "cursorline", "window", or "none".
+mode_emphasis = "cursorline"
+
+# macOS only: replace Herdr's generic notification with one whose click action
+# focuses the originating agent and activates the terminal application.
+actionable_notifications = false
+notification_app = "Alacritty"
+notification_sound = "default"

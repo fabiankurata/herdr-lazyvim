@@ -1,0 +1,8 @@
+brew "git"
+brew "gh"
+brew "jq"
+brew "neovim"
+brew "terminal-notifier"
+
+cask "alacritty"
+cask "font-jetbrains-mono-nerd-font"

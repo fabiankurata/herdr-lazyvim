@@ -1,0 +1,34 @@
+id = "fabiankurata.lazyvim"
+name = "Herdr LazyVim"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+platforms = ["macos", "linux"]
+description = "A persistent, project-aware LazyVim workspace for Herdr."
+
+[[panes]]
+id = "editor"
+title = "LazyVim"
+placement = "split"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/herdr/launch.sh\""]
+
+[[actions]]
+id = "open"
+title = "LazyVim: open or resume editor"
+contexts = ["pane", "workspace"]
+command = ["bash", "herdr/pane.sh", "open"]
+
+[[actions]]
+id = "toggle"
+title = "LazyVim: toggle editor"
+contexts = ["pane", "workspace"]
+command = ["bash", "herdr/pane.sh", "toggle"]
+
+[[actions]]
+id = "close"
+title = "LazyVim: close editor"
+contexts = ["pane", "workspace"]
+command = ["bash", "herdr/pane.sh", "close"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bash", "herdr/notify.sh"]
