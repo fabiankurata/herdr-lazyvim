@@ -1,0 +1,28 @@
+agent_placement = "split"
+terminal_placement = "zoomed"
+direction = "right"
+
+reuse_existing = true
+toggle_behavior = "hide"
+hide_tab_label = "LazyVim"
+resize_workaround = "nudge"
+resize_settle_delay = "0.12"
+prefer_agent_in_tab = true
+deduplicate_existing = true
+
+editor = "nvim"
+target = "."
+
+review_enabled = true
+comment_completion = false
+comment_display = "card"
+comment_range_style = "subtle"
+comment_card_position = "below"
+comment_card_width = "72"
+comment_card_background = "#16161e"
+comment_card_border = "#ff9e64"
+transparent_background = true
+mode_emphasis = "cursorline"
+actionable_notifications = true
+notification_app = "Alacritty"
+notification_sound = "default"

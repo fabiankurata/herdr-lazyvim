@@ -1,0 +1,33 @@
+[window]
+  opacity = 0.85
+
+[font.normal]
+family = "JetBrainsMono Nerd Font Mono"
+style = "Regular"
+
+[font.bold]
+family = "JetBrainsMono Nerd Font Mono"
+style = "Bold"
+
+[font.italic]
+family = "JetBrainsMono Nerd Font Mono"
+style = "Italic"
+
+[font.bold_italic]
+family = "JetBrainsMono Nerd Font Mono"
+style = "Bold Italic"
+
+[[keyboard.bindings]]
+key = "W"
+mods = "Command"
+action = "ReceiveChar"
+
+[[keyboard.bindings]]
+key = "N"
+mods = "Command"
+action = "ReceiveChar"
+
+[[keyboard.bindings]]
+key = "T"
+mods = "Command"
+action = "ReceiveChar"
