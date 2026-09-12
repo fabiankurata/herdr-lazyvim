@@ -302,6 +302,9 @@ comment_card_position = "below"
 comment_card_width = "72"
 comment_card_background = "#16161e"
 comment_card_border = "#ff9e64"
+comment_editor_background = "#20283a"
+comment_editor_layout = "inline"
+comment_editor_winblend = "40"
 transparent_background = true
 mode_emphasis = "cursorline"
 TOML
@@ -309,7 +312,7 @@ export TEST_EDITOR_LOG="$TMP/editor-log"
 "$ROOT/herdr/launch.sh"
 grep -Fx "let g:herdr_lazyvim_plugin=1" "$TEST_EDITOR_LOG" >/dev/null
 grep -Fx "set runtimepath^=$ROOT/nvim" "$TEST_EDITOR_LOG" >/dev/null
-grep -Fx "lua package.path = '$ROOT/nvim/lua/?.lua;$ROOT/nvim/lua/?/init.lua;' .. package.path; require('herdr_lazyvim').setup({ comment_completion = false, comment_display = 'virtual_line', comment_range_style = 'subtle', comment_card_position = 'below', comment_card_width = 72, comment_card_background = '#16161e', comment_card_border = '#ff9e64', transparent_background = true, mode_emphasis = 'cursorline' })" "$TEST_EDITOR_LOG" >/dev/null
+grep -Fx "lua package.path = '$ROOT/nvim/lua/?.lua;$ROOT/nvim/lua/?/init.lua;' .. package.path; require('herdr_lazyvim').setup({ comment_completion = false, comment_display = 'virtual_line', comment_range_style = 'subtle', comment_card_position = 'below', comment_card_width = 72, comment_card_background = '#16161e', comment_card_border = '#ff9e64', comment_editor_background = '#20283a', comment_editor_layout = 'inline', comment_editor_winblend = 40, transparent_background = true, mode_emphasis = 'cursorline' })" "$TEST_EDITOR_LOG" >/dev/null
 grep -Fx "$HOME/project" "$TEST_EDITOR_LOG" >/dev/null
 
 # Actionable notifications carry the originating pane into their click command

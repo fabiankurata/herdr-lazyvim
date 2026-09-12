@@ -1,6 +1,7 @@
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("herdr_review")
+local editor_ns = vim.api.nvim_create_namespace("herdr_review_editor")
 local comments = {}
 local active_root
 local config = {
@@ -9,8 +10,11 @@ local config = {
   comment_range_style = "subtle",
   comment_card_position = "below",
   comment_card_width = 72,
-  comment_card_background = "#16161e",
+  comment_card_background = "NONE",
   comment_card_border = "#ff9e64",
+  comment_editor_background = "#20283a",
+  comment_editor_layout = "inline",
+  comment_editor_winblend = 30,
   comment_save_keys = { "<D-CR>", "<C-s>" },
   last_agents = {},
 }
@@ -202,8 +206,20 @@ local function tail_to_width(text, width)
   return "…"
 end
 
-local function build_comment_card(comment, width)
+local function card_row(chunks, width, row_width)
+  local used = 0
+  for _, chunk in ipairs(chunks) do
+    used = used + vim.fn.strdisplaywidth(chunk[1])
+  end
+  if row_width > used then
+    table.insert(chunks, { string.rep(" ", row_width - used), "HerdrReviewComment" })
+  end
+  return chunks
+end
+
+local function build_comment_card(comment, width, row_width)
   width = math.max(32, width)
+  row_width = math.max(width, row_width or width)
   local prefix = " comment · "
   local suffix = ":" .. (comment.start == comment.finish and tostring(comment.start)
     or string.format("%d-%d", comment.start, comment.finish)) .. " "
@@ -211,45 +227,50 @@ local function build_comment_card(comment, width)
   local title = prefix .. tail_to_width(comment.file or "", file_width) .. suffix
   local top_fill = math.max(0, width - 3 - vim.fn.strdisplaywidth(title))
   local lines = {
-    { { "  ", "Normal" }, { "╭─" .. title .. string.rep("─", top_fill) .. "╮", "HerdrReviewCardBorder" } },
+    card_row({ { "╭─" .. title .. string.rep("─", top_fill) .. "╮", "HerdrReviewCardBorder" } }, width, row_width),
   }
   for _, content in ipairs(wrap_text(comment.text, width - 4)) do
     local padding = math.max(0, width - 4 - vim.fn.strdisplaywidth(content))
-    table.insert(lines, {
-      { "  ", "Normal" },
+    table.insert(lines, card_row({
       { "│ ", "HerdrReviewCardBorder" },
       { content .. string.rep(" ", padding), "HerdrReviewComment" },
       { " │", "HerdrReviewCardBorder" },
-    })
+    }, width, row_width))
   end
-  table.insert(lines, {
-    { "  ", "Normal" },
+  table.insert(lines, card_row({
     { "╰" .. string.rep("─", width - 2) .. "╯", "HerdrReviewCardBorder" },
-  })
+  }, width, row_width))
   return lines
 end
 
-local function decorate_comment(buf, comment)
+local function decorate_comment(buf, comment, overlap_counts)
   local line_count = vim.api.nvim_buf_line_count(buf)
   local first = math.max(1, comment.start)
   local last = math.min(comment.finish, line_count)
   for line = first, last do
-    local sign = "┃"
+    local sign = "│"
     if first == last then
-      sign = "●"
+      sign = "•"
     elseif line == first then
-      sign = "┏"
+      sign = "╭"
     elseif line == last then
-      sign = "┗"
+      sign = "╰"
+    end
+    if overlap_counts and overlap_counts[line] and overlap_counts[line] > 1 then
+      sign = "┊"
     end
     local range_mark = {
       sign_text = sign,
       sign_hl_group = "HerdrReviewGutter",
       number_hl_group = "HerdrReviewGutter",
+      hl_eol = true,
       priority = 120,
     }
     if config.comment_range_style == "subtle" then
-      range_mark.line_hl_group = "HerdrReviewRange"
+      range_mark.end_row = line
+      range_mark.end_col = 0
+      range_mark.hl_group = "HerdrReviewRange"
+      range_mark.hl_eol = true
     elseif config.comment_range_style == "selection" then
       range_mark.line_hl_group = "Visual"
     end
@@ -268,7 +289,14 @@ local function decorate_comment(buf, comment)
     }
     comment_mark.virt_text_pos = "eol"
   else
-    comment_mark.virt_lines = build_comment_card(comment, config.comment_card_width)
+    local win = vim.fn.bufwinid(buf)
+    local row_width = config.comment_card_width
+    if win ~= -1 then
+      local info = vim.fn.getwininfo(win)[1]
+      row_width = vim.api.nvim_win_get_width(win) - (info and info.textoff or 0)
+    end
+    local card_width = math.min(config.comment_card_width, row_width)
+    comment_mark.virt_lines = build_comment_card(comment, card_width, row_width)
     comment_mark.virt_lines_above = config.comment_card_position == "above"
   end
   local card_line = config.comment_card_position == "above" and first or last
@@ -285,14 +313,22 @@ local function decorate(buf)
   end
   load(location.root)
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  local visible = {}
+  local overlap_counts = {}
   for _, comment in ipairs(comments) do
     if
       comment.file == location.file
       and not not comment.removed == location.removed
       and comment.start <= vim.api.nvim_buf_line_count(buf)
     then
-      decorate_comment(buf, comment)
+      table.insert(visible, comment)
+      for line = comment.start, math.min(comment.finish, vim.api.nvim_buf_line_count(buf)) do
+        overlap_counts[line] = (overlap_counts[line] or 0) + 1
+      end
     end
+  end
+  for _, comment in ipairs(visible) do
+    decorate_comment(buf, comment, overlap_counts)
   end
 end
 
@@ -322,13 +358,18 @@ local function restore_source(context)
   end
 end
 
-local function comment_editor(title, initial, callback)
+local function comment_editor(title, initial, anchor_line, callback)
   local source = {
     win = vim.api.nvim_get_current_win(),
+    buf = vim.api.nvim_get_current_buf(),
     mode = vim.api.nvim_get_mode().mode,
   }
-  local width = math.min(78, math.max(40, vim.o.columns - 8))
-  local height = math.min(10, math.max(5, vim.o.lines - 8))
+  local source_width = vim.api.nvim_win_get_width(source.win)
+  local source_info = vim.fn.getwininfo(source.win)[1]
+  local textoff = source_info and source_info.textoff or 0
+  local width = math.max(32, math.min(config.comment_card_width, source_width - textoff - 2))
+  local initial_lines = initial and vim.split(initial, "\n", { plain = true }) or { "" }
+  local height = math.min(10, math.max(1, #initial_lines))
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].filetype = "markdown"
@@ -339,21 +380,70 @@ local function comment_editor(title, initial, callback)
     vim.bo[buf].omnifunc = ""
   end
   vim.diagnostic.enable(false, { bufnr = buf })
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial and vim.split(initial, "\n", { plain = true }) or { "" })
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
 
-  local win = vim.api.nvim_open_win(buf, true, {
-    relative = "editor",
-    row = math.floor((vim.o.lines - height) / 2) - 1,
-    col = math.floor((vim.o.columns - width) / 2),
+  local function spacer_lines(count)
+    local lines = {}
+    for _ = 1, count + 2 do
+      table.insert(lines, { { "", "Normal" } })
+    end
+    return lines
+  end
+
+  local inline = config.comment_editor_layout ~= "float"
+  local spacer
+  local window_config = {
     width = width,
     height = height,
     style = "minimal",
     border = "rounded",
     title = " " .. title .. " · Cmd-Enter / Ctrl-S save · q cancel ",
     title_pos = "center",
-  })
+  }
+  if inline then
+    spacer = vim.api.nvim_buf_set_extmark(source.buf, editor_ns, math.max(0, anchor_line - 1), 0, {
+      virt_lines = spacer_lines(height),
+      virt_lines_above = false,
+    })
+    window_config.relative = "win"
+    window_config.win = source.win
+    window_config.bufpos = { math.max(0, anchor_line - 1), 0 }
+    window_config.row = 1
+    window_config.col = textoff
+  else
+    window_config.relative = "editor"
+    window_config.row = math.floor((vim.o.lines - height) / 2) - 1
+    window_config.col = math.floor((vim.o.columns - width) / 2)
+  end
+
+  local win = vim.api.nvim_open_win(buf, true, window_config)
   vim.wo[win].wrap = true
-  vim.wo[win].winhl = "FloatBorder:DiagnosticInfo"
+  vim.wo[win].winhl = table.concat({
+    "NormalFloat:HerdrReviewEditor",
+    "FloatBorder:HerdrReviewCardBorder",
+    "FloatTitle:HerdrReviewEditorTitle",
+  }, ",")
+  vim.wo[win].winblend = math.max(0, math.min(100, tonumber(config.comment_editor_winblend) or 0))
+
+  local function resize()
+    if not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_win_is_valid(win) then
+      return
+    end
+    local next_height = math.min(10, math.max(1, vim.api.nvim_buf_line_count(buf)))
+    vim.api.nvim_win_set_config(win, { height = next_height })
+    if spacer and vim.api.nvim_buf_is_valid(source.buf) then
+      spacer = vim.api.nvim_buf_set_extmark(source.buf, editor_ns, math.max(0, anchor_line - 1), 0, {
+        id = spacer,
+        virt_lines = spacer_lines(next_height),
+        virt_lines_above = false,
+      })
+    end
+  end
+
+  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+    buffer = buf,
+    callback = resize,
+  })
 
   local finished = false
   local function finish()
@@ -361,6 +451,9 @@ local function comment_editor(title, initial, callback)
       return
     end
     finished = true
+    if spacer and vim.api.nvim_buf_is_valid(source.buf) then
+      pcall(vim.api.nvim_buf_del_extmark, source.buf, editor_ns, spacer)
+    end
     -- Wait until the Insert-mode save mapping has completely returned before
     -- restoring the mode that was active in the source buffer.
     vim.defer_fn(function()
@@ -448,7 +541,7 @@ function M.comment(visual)
   if removed then
     location = location .. " (removed)"
   end
-  comment_editor("Comment " .. location, nil, function(text)
+  comment_editor("Comment " .. location, nil, last, function(text)
     table.insert(comments, {
       file = file,
       start = first,
@@ -518,7 +611,7 @@ end
 local function edit_comment(comment)
   local range = comment.start == comment.finish and tostring(comment.start)
     or string.format("%d-%d", comment.start, comment.finish)
-  comment_editor(string.format("Edit %s:%s", comment.file, range), comment.text, function(text)
+  comment_editor(string.format("Edit %s:%s", comment.file, range), comment.text, comment.finish, function(text)
     comment.text = text
     save()
     refresh()
@@ -604,19 +697,23 @@ local function agent_name(agent)
   return agent.pane_id
 end
 
-local function pane_number(agent)
-  return agent.pane_id:match(":p(%d+)$") or agent.pane_id
+local function tab_labels(stdout)
+  local ok, response = pcall(vim.json.decode, stdout)
+  local rows = ok and response and response.result and response.result.tabs or {}
+  local labels = {}
+  for _, tab in ipairs(rows) do
+    if type(tab.tab_id) == "string" and type(tab.label) == "string" and tab.label ~= "" then
+      labels[tab.tab_id] = tab.label
+    end
+  end
+  return labels
 end
 
-local function agent_label(agent, workspace)
+local function agent_label(agent, workspace, tabs)
   local last_used = config.last_agents[workspace] == agent.pane_id and " · last used" or ""
-  return string.format(
-    "%s · pane %s · %s%s",
-    agent_name(agent),
-    pane_number(agent),
-    agent.agent_status or "unknown",
-    last_used
-  )
+  local tab = tabs and tabs[agent.tab_id]
+  local tab_suffix = tab and " · " .. tab or ""
+  return string.format("%s · %s%s%s", agent_name(agent), agent.agent_status or "unknown", tab_suffix, last_used)
 end
 
 local function choose_agent(callback)
@@ -646,15 +743,20 @@ local function choose_agent(callback)
       elseif #agents == 1 then
         callback(agents[1])
       else
-        vim.ui.select(agents, {
-          prompt = "Send review to agent",
-          format_item = function(agent)
-            return agent_label(agent, workspace)
-          end,
-        }, function(agent)
-          if agent then
-            callback(agent)
-          end
+        vim.system({ herdr, "tab", "list", "--workspace", workspace }, { text = true }, function(tab_result)
+          vim.schedule(function()
+            local tabs = tab_result.code == 0 and tab_labels(tab_result.stdout) or {}
+            vim.ui.select(agents, {
+              prompt = "Send review to agent",
+              format_item = function(agent)
+                return agent_label(agent, workspace, tabs)
+              end,
+            }, function(agent)
+              if agent then
+                callback(agent)
+              end
+            end)
+          end)
         end)
       end
     end)
@@ -699,13 +801,22 @@ function M.setup(opts)
   load_last_agents()
   config = vim.tbl_deep_extend("force", config, opts or {})
   local normal = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
-  local card_background = tonumber(config.comment_card_background:sub(2), 16)
+  local card_background = type(config.comment_card_background) == "string"
+      and config.comment_card_background:match("^#%x%x%x%x%x%x$")
+      and tonumber(config.comment_card_background:sub(2), 16)
+    or nil
+  local editor_background = type(config.comment_editor_background) == "string"
+      and config.comment_editor_background:match("^#%x%x%x%x%x%x$")
+      and tonumber(config.comment_editor_background:sub(2), 16)
+    or nil
   local card_border = tonumber(config.comment_card_border:sub(2), 16)
   vim.api.nvim_set_hl(0, "HerdrReviewComment", { fg = normal.fg, bg = card_background })
   vim.api.nvim_set_hl(0, "HerdrReviewHeader", { fg = "#7dcfff", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "HerdrReviewGutter", { fg = "#7dcfff", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "HerdrReviewRange", { bg = "#20283a", default = true })
+  vim.api.nvim_set_hl(0, "HerdrReviewGutter", { fg = card_border, bold = true })
+  vim.api.nvim_set_hl(0, "HerdrReviewRange", { bg = card_background })
   vim.api.nvim_set_hl(0, "HerdrReviewCardBorder", { fg = card_border, bg = card_background, bold = true })
+  vim.api.nvim_set_hl(0, "HerdrReviewEditor", { fg = normal.fg, bg = editor_background })
+  vim.api.nvim_set_hl(0, "HerdrReviewEditorTitle", { fg = card_border, bg = editor_background, bold = true })
   vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost" }, {
     group = vim.api.nvim_create_augroup("HerdrReview", { clear = true }),
     callback = function(args)
@@ -749,10 +860,13 @@ M._format_comments = format_comments
 M._selection = selection
 M._buffer_location = buffer_location
 M._agent_label = agent_label
+M._tab_labels = tab_labels
 M._decorate_comment = decorate_comment
 M._namespace = ns
 M._range_label = range_label
 M._restore_source = restore_source
 M._build_comment_card = build_comment_card
+M._comment_editor = comment_editor
+M._editor_namespace = editor_ns
 
 return M

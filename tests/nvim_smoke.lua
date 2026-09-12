@@ -18,8 +18,13 @@ local expected = table.concat({
 }, "\n")
 
 assert(payload == expected, "review comments should be sorted and retain selected source")
-local agent_label = review._agent_label({ pane_id = "workspace:p7", agent = "codex", agent_status = "idle" }, "workspace")
-assert(agent_label:match("codex") and agent_label:match("pane 7") and agent_label:match("idle"), "agent labels should identify the target")
+local tabs = review._tab_labels('{"result":{"tabs":[{"tab_id":"workspace:t2","label":"2"}]}}')
+local agent_label = review._agent_label(
+  { pane_id = "workspace:p7", tab_id = "workspace:t2", agent = "codex", agent_status = "idle" },
+  "workspace",
+  tabs
+)
+assert(agent_label == "codex · idle · 2", "agent labels should use the tab label, not the global pane id")
 assert(type(require("herdr_lazyvim").setup) == "function", "integration entrypoint should load")
 
 local plugin_spec = dofile("nvim/lua/plugins/herdr-lazyvim.lua")
@@ -68,12 +73,12 @@ review.setup({
   comment_display = "card",
   comment_card_position = "below",
   comment_card_width = 44,
-  comment_card_background = "#16161e",
+  comment_card_background = "NONE",
   comment_card_border = "#ff9e64",
 })
 local review_buf = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_buf_set_lines(review_buf, 0, -1, false, { "one", "two", "three", "four", "five" })
-review._decorate_comment(review_buf, { start = 2, finish = 4, text = "Review this range" })
+review._decorate_comment(review_buf, { start = 2, finish = 4, text = "Review this range" }, { [3] = 2 })
 local marks = vim.api.nvim_buf_get_extmarks(review_buf, review._namespace, 0, -1, { details = true })
 assert(#marks == 4, "a three-line comment should have three gutter marks and one label")
 local signs = 0
@@ -83,7 +88,11 @@ for _, mark in ipairs(marks) do
   local details = mark[4]
   if details.sign_text then
     signs = signs + 1
-    assert(details.line_hl_group == "HerdrReviewRange", "comment ranges should use the subtle highlight")
+    assert(details.hl_group == "HerdrReviewRange", "comment ranges should use the subtle highlight")
+    assert(details.hl_eol == true, "comment range backgrounds should fill the complete source row")
+    if mark[2] == 2 then
+      assert(details.sign_text == "┊ ", "overlapping comment ranges should use a dotted rail")
+    end
   end
   if details.virt_lines then
     card = details.virt_lines
@@ -92,18 +101,30 @@ for _, mark in ipairs(marks) do
   end
 end
 assert(signs == 3, "every commented line should have a gutter marker")
+local gutter_hl = vim.api.nvim_get_hl(0, { name = "HerdrReviewGutter", link = false })
+local range_hl = vim.api.nvim_get_hl(0, { name = "HerdrReviewRange", link = false })
+local comment_hl = vim.api.nvim_get_hl(0, { name = "HerdrReviewComment", link = false })
+assert(gutter_hl.fg == tonumber("ff9e64", 16), "range rails should share the card border color")
+assert(range_hl.bg == nil and comment_hl.bg == nil, "source ranges and comment rows should be transparent")
 assert(card_row == 3, "the comment card should attach to the final commented line")
 assert(#card == 3, "a one-line comment card should include top, body, and bottom rows")
-assert(card[1][2][1]:match("^╭─ comment"), "the comment card should use a rounded top border")
-assert(card[#card][2][1]:match("^╰"), "the comment card should use a rounded bottom border")
+assert(card[1][1][1]:match("^╭─ comment"), "the comment card should use a rounded top border without a left indent")
+assert(card[#card][1][1]:match("^╰"), "the comment card should use a rounded bottom border without a left indent")
 assert(review._range_label({ start = 2, finish = 4 }) == "lines 2–4", "comment labels should show the full range")
 local wrapped_card = review._build_comment_card({
   file = "src/example.ts",
   start = 2,
   finish = 4,
   text = "This long review comment should wrap cleanly inside the darker bordered card.",
-}, 32)
+}, 32, 48)
 assert(#wrapped_card > 3, "long comments should wrap to multiple card rows")
+for _, row in ipairs(wrapped_card) do
+  local width = 0
+  for _, chunk in ipairs(row) do
+    width = width + vim.fn.strdisplaywidth(chunk[1])
+  end
+  assert(width == 48, "comment rows should fill the complete annotation band")
+end
 
 local source_win = vim.api.nvim_get_current_win()
 local float_buf = vim.api.nvim_create_buf(false, true)
@@ -140,6 +161,29 @@ assert(vim.api.nvim_get_mode().mode == "V", "a visual comment should restore its
 assert(vim.fn.line("v") == 1 and vim.fn.line(".") == 2, "the restored Visual selection should retain its range")
 vim.cmd("normal! \27")
 vim.api.nvim_win_close(visual_float_win, true)
+
+local editor_source_buf = vim.api.nvim_get_current_buf()
+local editor_textoff = vim.fn.getwininfo(vim.api.nvim_get_current_win())[1].textoff
+review._comment_editor("Comment test.lua:2", nil, 2, function() end)
+local editor_win = vim.api.nvim_get_current_win()
+local editor_buf = vim.api.nvim_win_get_buf(editor_win)
+local editor_config = vim.api.nvim_win_get_config(editor_win)
+assert(editor_config.relative == "win", "the comment editor should be anchored to the source window")
+assert(editor_config.height == 1, "the comment editor should start at one line")
+assert(editor_config.bufpos[1] == 1, "the comment editor should anchor after the selected source line")
+assert(editor_config.col == editor_textoff, "the inline editor should align after the source window gutter")
+assert(vim.wo[editor_win].winblend == 30, "the comment editor should use the default translucent blend")
+local spacers = vim.api.nvim_buf_get_extmarks(editor_source_buf, review._editor_namespace, 0, -1, { details = true })
+assert(#spacers == 1 and #spacers[1][4].virt_lines == 3, "a one-line editor should reserve its row and border")
+vim.api.nvim_buf_set_lines(editor_buf, 0, -1, false, { "first", "second" })
+vim.api.nvim_exec_autocmds("TextChanged", { buffer = editor_buf })
+assert(vim.api.nvim_win_get_config(editor_win).height == 2, "the comment editor should grow with multiline input")
+spacers = vim.api.nvim_buf_get_extmarks(editor_source_buf, review._editor_namespace, 0, -1, { details = true })
+assert(#spacers[1][4].virt_lines == 4, "reserved source space should grow with the editor")
+vim.api.nvim_win_close(editor_win, true)
+vim.wait(30)
+spacers = vim.api.nvim_buf_get_extmarks(editor_source_buf, review._editor_namespace, 0, -1, { details = true })
+assert(#spacers == 0, "closing the comment editor should release its reserved source space")
 
 print("nvim smoke tests: ok")
 vim.cmd("qa!")

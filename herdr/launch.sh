@@ -13,8 +13,11 @@ comment_display=$(config_string comment_display "card")
 comment_range_style=$(config_string comment_range_style "subtle")
 comment_card_position=$(config_string comment_card_position "below")
 comment_card_width=$(config_string comment_card_width "72")
-comment_card_background=$(config_string comment_card_background "#16161e")
+comment_card_background=$(config_string comment_card_background "NONE")
 comment_card_border=$(config_string comment_card_border "#ff9e64")
+comment_editor_background=$(config_string comment_editor_background "#20283a")
+comment_editor_layout=$(config_string comment_editor_layout "inline")
+comment_editor_winblend=$(config_string comment_editor_winblend "30")
 transparent_background=$(config_bool transparent_background true)
 mode_emphasis=$(config_string mode_emphasis "cursorline")
 
@@ -38,13 +41,25 @@ if ! printf '%s' "$comment_card_width" | grep -Eq '^[0-9]+$' \
   printf 'Herdr LazyVim: comment_card_width must be between 32 and 120\n' >&2
   exit 1
 fi
-for color_name in comment_card_background comment_card_border; do
+for color_name in comment_card_background comment_card_border comment_editor_background; do
   color_value=${!color_name}
-  if ! printf '%s' "$color_value" | grep -Eq '^#[0-9a-fA-F]{6}$'; then
+  if ! printf '%s' "$color_value" | grep -Eq '^(NONE|#[0-9a-fA-F]{6})$'; then
     printf 'Herdr LazyVim: invalid %s: %s\n' "$color_name" "$color_value" >&2
     exit 1
   fi
 done
+case "$comment_editor_layout" in
+  inline | float) ;;
+  *)
+    printf 'Herdr LazyVim: invalid comment_editor_layout: %s\n' "$comment_editor_layout" >&2
+    exit 1
+    ;;
+esac
+if ! printf '%s' "$comment_editor_winblend" | grep -Eq '^[0-9]+$' \
+  || [ "$comment_editor_winblend" -gt 100 ]; then
+  printf 'Herdr LazyVim: comment_editor_winblend must be between 0 and 100\n' >&2
+  exit 1
+fi
 case "$comment_range_style" in
   subtle | gutter | selection) ;;
   *)
@@ -77,7 +92,7 @@ if [ "$review_enabled" = true ]; then
   lua_root=${plugin_root//\'/\'\'}
   set -- "$@" \
     -c "set runtimepath^=${plugin_root// /\\ }/nvim" \
-    -c "lua package.path = '$lua_root/nvim/lua/?.lua;$lua_root/nvim/lua/?/init.lua;' .. package.path; require('herdr_lazyvim').setup({ comment_completion = $comment_completion, comment_display = '$comment_display', comment_range_style = '$comment_range_style', comment_card_position = '$comment_card_position', comment_card_width = $comment_card_width, comment_card_background = '$comment_card_background', comment_card_border = '$comment_card_border', transparent_background = $transparent_background, mode_emphasis = '$mode_emphasis' })"
+    -c "lua package.path = '$lua_root/nvim/lua/?.lua;$lua_root/nvim/lua/?/init.lua;' .. package.path; require('herdr_lazyvim').setup({ comment_completion = $comment_completion, comment_display = '$comment_display', comment_range_style = '$comment_range_style', comment_card_position = '$comment_card_position', comment_card_width = $comment_card_width, comment_card_background = '$comment_card_background', comment_card_border = '$comment_card_border', comment_editor_background = '$comment_editor_background', comment_editor_layout = '$comment_editor_layout', comment_editor_winblend = $comment_editor_winblend, transparent_background = $transparent_background, mode_emphasis = '$mode_emphasis' })"
 fi
 
 exec "$editor" "$@" "$target"

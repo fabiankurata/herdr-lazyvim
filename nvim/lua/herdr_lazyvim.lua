@@ -27,8 +27,11 @@ function M.setup(opts)
       comment_range_style = opts.comment_range_style or "subtle",
       comment_card_position = opts.comment_card_position or "below",
       comment_card_width = opts.comment_card_width or 72,
-      comment_card_background = opts.comment_card_background or "#16161e",
+      comment_card_background = opts.comment_card_background or "NONE",
       comment_card_border = opts.comment_card_border or "#ff9e64",
+      comment_editor_background = opts.comment_editor_background or "#20283a",
+      comment_editor_layout = opts.comment_editor_layout or "inline",
+      comment_editor_winblend = opts.comment_editor_winblend == nil and 30 or opts.comment_editor_winblend,
       comment_save_keys = opts.comment_save_keys or { "<D-CR>", "<C-s>" },
     })
   else
