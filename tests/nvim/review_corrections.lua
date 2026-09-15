@@ -53,6 +53,21 @@ for _, replacement in ipairs({ "replacement", vim.NIL, 42 }) do
   assert(callbacks == 1 and result.ok and result.value.text == "captured comment", "add snapshots validated text")
 end
 
+-- A cancellation after the durable commit completed cannot relabel it.
+do
+  local result, callbacks
+  callbacks = 0
+  local operation = feedback.add({ bufnr = vim.api.nvim_get_current_buf(), range = { start_line = 1, end_line = 1 }, text = "committed before cancel" }, function(value)
+    callbacks = callbacks + 1
+    result = value
+  end)
+  wait_for(function() return result ~= nil end, "committed add completes")
+  local committed_bytes = bytes(root)
+  operation.cancel()
+  vim.wait(30)
+  assert(callbacks == 1 and result.ok and bytes(root) == committed_bytes, "late cancellation does not relabel a commit")
+end
+
 -- F6: the documented gutter option remains valid through both boundaries.
 assert(require("herdr_feedback.legacy").validate_setup({ comment_range_style = "gutter" }), "legacy accepts gutter")
 vim.g.mapleader = " "
@@ -63,7 +78,7 @@ assert(vim.fn.maparg("<leader>rc", "n"):find("custom", 1, true), "gutter setup p
 assert(feedback.setup({ comment_range_style = "gutter" }).value.already_configured, "gutter setup is idempotent")
 assert(not feedback.setup({ comment_range_style = "not-a-style" }).ok, "invalid styles remain rejected")
 vim.cmd("doautocmd BufEnter")
-local marks = vim.api.nvim_buf_get_extmarks(0, require("herdr_feedback.legacy")._namespace, 0, -1, { details = true })
+local marks = vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_get_namespaces().herdr_review, 0, -1, { details = true })
 assert(#marks > 0 and marks[1][4].sign_text and not marks[1][4].hl_group and not marks[1][4].line_hl_group,
   "gutter rendering has a sign without a range tint")
 
@@ -148,6 +163,30 @@ assert(first == nil, "thrown transaction reports failure")
 local second, second_error = store.update(review(root), function(records) return records, true end)
 assert(second and not second_error, "writer after thrown transaction acquires released lock")
 
+-- Retain a primary transaction exception when lock cleanup also reports a
+-- failure, while still proving the next writer owns a released descriptor.
+local original_open, original_close = vim.uv.fs_open, vim.uv.fs_close
+local lock_descriptor
+vim.uv.fs_open = function(path, flags, mode, callback)
+  local file, message, code = original_open(path, flags, mode, callback)
+  if not callback and file and path:find(".lock-v2", 1, true) then lock_descriptor = file end
+  return file, message, code
+end
+vim.uv.fs_close = function(file, callback)
+  if not callback and file == lock_descriptor then original_close(file); return nil, "controlled cleanup failure" end
+  return original_close(file, callback)
+end
+local cleanup_random = vim.uv.random
+local primary, primary_error = store.update(review(root), function(records)
+  vim.uv.random = function() error("controlled primary failure") end
+  return records, true
+end)
+vim.uv.random, vim.uv.fs_open, vim.uv.fs_close = cleanup_random, original_open, original_close
+assert(primary == nil and primary_error:find("controlled primary failure", 1, true)
+    and primary_error:find("additionally could not release", 1, true), "primary plus cleanup failure retains both contexts")
+local recovered, recovered_error = store.update(review(root), function(records) return records, true end)
+assert(recovered and not recovered_error, "writer after cleanup diagnostic acquires released lock")
+
 -- A missing bundled executable is a definite startup failure, not a lost done.
 vim.env.HERDR_SOCKET_PATH = "missing-socket"
 local missing_target = {
@@ -183,12 +222,13 @@ local sent, sent_callbacks
 sent_callbacks = 0
 feedback.send({ review = review(root), target = target }, function(value) sent_callbacks = sent_callbacks + 1; sent = value end)
 -- Change every relevant ambient selector before scheduled startup.
-vim.env.HERDR_SOCKET_PATH = "socket-B"; vim.env.HERDR_BIN_PATH = "herdr-B"; vim.env.HERDR_SESSION = "other"; vim.env.HERDR_CONFIG_PATH = "other-config"
+vim.env.HERDR_SOCKET_PATH = "socket-B"; vim.env.HERDR_BIN_PATH = "herdr-B"; vim.env.HERDR_SESSION = "other"; vim.env.HERDR_CONFIG_PATH = "other-config"; vim.env.HERDR_SERVER_SESSION = "other-server"
 wait_for(function() return pending.preflight ~= nil end, "explicit preflight starts")
 local first_command = command_calls[1]
 assert(first_command.argv[1] == "herdr-A" and first_command.options.clear_env, "preflight captures executable and isolates environment")
 assert(first_command.options.env.HERDR_SOCKET_PATH == "socket-A" and first_command.options.env.HERDR_RUNTIME_LEASE_TOKEN == "fixture-lease", "preflight keeps captured socket and lease")
-assert(first_command.options.env.HERDR_SESSION == nil and first_command.options.env.HERDR_CONFIG_PATH == nil, "preflight removes competing selectors")
+assert(first_command.options.env.HERDR_SESSION == nil and first_command.options.env.HERDR_CONFIG_PATH == nil
+    and first_command.options.env.HERDR_SERVER_SESSION == nil, "preflight removes competing selectors")
 pending.preflight({ code = 0, stdout = vim.json.encode({ result = { agents = {
   { workspace_id = "workspace", tab_id = "tab", pane_id = "pane", agent_session = { kind = "id", value = "agent" } },
 } } }), stderr = "" })
@@ -201,6 +241,7 @@ pending.delivery({ code = 0, stdout = "", stderr = "" })
 wait_for(function() return sent ~= nil end, "focus failure still completes delivered operation")
 assert(sent_callbacks == 1 and sent.ok and sent.value.outcome == "delivered_to_input", "focus failure retains confirmed delivery")
 assert(command_calls[3].argv[1] == "herdr-A" and command_calls[3].options.env.HERDR_SOCKET_PATH == "socket-A", "focus uses captured route")
+assert(command_calls[3].options.env.HERDR_SESSION == nil and command_calls[3].options.env.HERDR_SERVER_SESSION == nil, "focus removes competing selectors")
 vim.system = old_system
 
 print("PR02 correction regressions: lifecycle, routing, snapshot, and gutter: ok")
