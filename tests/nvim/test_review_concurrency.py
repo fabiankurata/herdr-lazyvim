@@ -43,6 +43,7 @@ class ReviewConcurrencyTests(unittest.TestCase):
             "HERDR_REVIEW_ROOT": str(root / "worktree"),
             "HERDR_REVIEW_CONTROL": str(control),
             "HERDR_REVIEW_ROLE": role,
+            "HERDR_NVIM_TEST_SCRIPT": str(HERE / "review_concurrency_worker.lua"),
         })
         if scenario:
             values["HERDR_REVIEW_SCENARIO"] = scenario
@@ -88,15 +89,13 @@ class ReviewConcurrencyTests(unittest.TestCase):
                 control = root / "control"
                 control.mkdir()
                 reader = subprocess.Popen([
-                    "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l",
-                    str(HERE / "review_concurrency_worker.lua"),
+                    "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l", str(HERE / "run_test.lua"),
                 ], cwd=REPO, env=self.environment(root, "reader", shared_state, control, "reader", scenario),
                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 try:
                     self.wait_for(control / "reader-ready", reader)
                     writer = subprocess.run([
-                        "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l",
-                        str(HERE / "review_concurrency_worker.lua"),
+                        "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l", str(HERE / "run_test.lua"),
                     ], cwd=REPO, env=self.environment(root, "writer", shared_state, control, "writer"),
                         text=True, capture_output=True, timeout=10)
                     self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
@@ -116,6 +115,19 @@ class ReviewConcurrencyTests(unittest.TestCase):
                         (persisted["comments"][1]["id"], 1, "new annotation"),
                     ],
                 )
+
+    def test_headless_runner_exits_nonzero_on_script_error(self):
+        with tempfile.TemporaryDirectory(prefix="herdr-nvim-failure-", dir="/tmp") as temporary:
+            root = Path(temporary)
+            script = root / "failure.lua"
+            script.write_text("error('intentional headless fixture failure')\n")
+            environment = self.environment(root, "failure", root / "state", root, "failure")
+            environment["HERDR_NVIM_TEST_SCRIPT"] = str(script)
+            result = subprocess.run([
+                "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l", str(HERE / "run_test.lua"),
+            ], cwd=REPO, env=environment, text=True, capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("intentional headless fixture failure", result.stderr)
 
 
 if __name__ == "__main__":

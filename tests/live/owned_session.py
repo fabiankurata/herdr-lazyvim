@@ -9,6 +9,7 @@ import json
 import math
 import os
 import platform
+import re
 import sys
 from pathlib import Path
 import shutil
@@ -25,6 +26,55 @@ from runtime_lease import require_runtime_lease, preserve_lease_environment
 
 class OwnershipError(RuntimeError):
     pass
+
+
+class _BoundedOutput:
+    """Drain a child stream while retaining only its most recent bytes."""
+    limit = 65536
+
+    def __init__(self):
+        self.data = bytearray()
+        self.total = 0
+        self.lock = threading.Lock()
+
+    def append(self, value):
+        with self.lock:
+            self.total += len(value)
+            self.data.extend(value)
+            if len(self.data) > self.limit:
+                del self.data[:-self.limit]
+
+    def text(self):
+        with self.lock:
+            return bytes(self.data).decode(errors="replace")
+
+
+def _drain_output(stream, retained):
+    try:
+        while True:
+            value = stream.read(8192)
+            if not value:
+                return
+            retained.append(value)
+    except (OSError, ValueError):
+        return
+
+
+def public_diagnostic(text, environment, limit=16384):
+    """Return bounded child output with inherited control values removed."""
+    value = text or ""
+    secrets_to_remove = []
+    for key, item in environment.items():
+        if key in {"HOME", "ZDOTDIR"} or key.startswith(("HERDR", "NVIM", "XDG_")):
+            if isinstance(item, str) and len(item) >= 4:
+                secrets_to_remove.append((key, item))
+    for key, item in sorted(secrets_to_remove, key=lambda pair: len(pair[1]), reverse=True):
+        value = value.replace(item, "<redacted:" + key + ">")
+    value = re.sub(r"(?i)((?:token|password|secret)\s*[=:]\s*)\S+", r"\1<redacted>", value)
+    if len(value) > limit:
+        half = (limit - len("\n... diagnostics truncated ...\n")) // 2
+        value = value[:half] + "\n... diagnostics truncated ...\n" + value[-half:]
+    return value
 
 
 def write_json(path, value):
@@ -362,10 +412,13 @@ class OwnedSession:
     def _spawn(self, argv, **kwargs):
         with defer_cancellation():
             environment = kwargs.pop("env", self.env)
+            started = kwargs.pop("_started", None)
             child = subprocess.Popen(argv, env=environment, cwd=self._root,
                                      start_new_session=True, **kwargs)
             self._children.append(child)
             self._groups.add(child.pid)
+            if started is not None:
+                started(child)
         self._remember()
         return child
 
@@ -384,25 +437,87 @@ class OwnedSession:
         if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
             raise ValueError("child deadline must be finite positive seconds")
         deadline = time.monotonic() + duration
+        diagnostic = self._evidence / ("child-" + uuid.uuid4().hex)
+        diagnostic.mkdir(mode=0o700)
+        stdout_retained, stderr_retained = _BoundedOutput(), _BoundedOutput()
+        readers = []
+        child = None
+
+        def finish_diagnostic(status):
+            for reader in readers:
+                reader.join(timeout=2)
+            stdout, stderr = stdout_retained.text(), stderr_retained.text()
+            for name, value in (("stdout.txt", stdout), ("stderr.txt", stderr)):
+                descriptor = os.open(diagnostic / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "w") as stream:
+                    stream.write(value)
+            write_json(diagnostic / "result.json", {
+                "status": status,
+                "stage": Path(str(argv[0])).name,
+                "argument_count": len(argv),
+                "returncode": child.returncode if child is not None else None,
+                "stdout_bytes_seen": stdout_retained.total,
+                "stderr_bytes_seen": stderr_retained.total,
+                "stdout_truncated": stdout_retained.total > stdout_retained.limit,
+                "stderr_truncated": stderr_retained.total > stderr_retained.limit,
+            })
+            return stdout, stderr
+
         try:
-            child = self._spawn(argv, env=environment,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            def start_readers(process):
+                nonlocal child
+                child = process
+                for stream, retained in ((child.stdout, stdout_retained), (child.stderr, stderr_retained)):
+                    reader = threading.Thread(target=_drain_output, args=(stream, retained), daemon=True)
+                    reader.start()
+                    readers.append(reader)
+            child = self._spawn(
+                argv, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                _started=start_readers,
+            )
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(argv, duration)
                 try:
-                    stdout, stderr = child.communicate(timeout=min(0.1, remaining))
+                    child.wait(timeout=min(0.1, remaining))
                     break
                 except subprocess.TimeoutExpired:
                     self._remember()
             self._remember()
-        except BaseException:
-            self.close()
-            raise
+        except BaseException as primary:
+            cleanup = None
+            try:
+                self.close()
+            except BaseException as error:
+                cleanup = error
+            status = "TIMEOUT" if isinstance(primary, subprocess.TimeoutExpired) else (
+                "CANCELLED" if isinstance(primary, KeyboardInterrupt) else "FAILED"
+            )
+            stdout, stderr = finish_diagnostic(status)
+            if isinstance(primary, subprocess.TimeoutExpired):
+                failure = subprocess.TimeoutExpired(argv, duration, output=stdout, stderr=stderr)
+                failure.__cause__ = primary
+            else:
+                failure = primary
+                failure.stdout, failure.stderr = stdout, stderr
+            failure.stage = Path(str(argv[0])).name
+            failure.diagnostic_path = str(diagnostic)
+            if cleanup is not None:
+                primary.__context__ = cleanup
+            raise failure
+        stdout, stderr = finish_diagnostic("PASS" if child.returncode == 0 else "NONZERO")
         result = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+        result.stage = Path(str(argv[0])).name
+        result.diagnostic_path = str(diagnostic)
         if check:
-            result.check_returncode()
+            if result.returncode:
+                failure = subprocess.CalledProcessError(
+                    result.returncode, result.args, output=result.stdout, stderr=result.stderr,
+                )
+                failure.stage = result.stage
+                failure.diagnostic_path = result.diagnostic_path
+                raise failure
         return result
 
     def run(self, *args, check=True):

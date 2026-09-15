@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -19,7 +20,7 @@ from runtime_lease import require_runtime_lease
 require_runtime_lease()
 from owned_session import (OwnedSession, OwnershipError, default_identities,
                            exception_evidence, fixture_identities,
-                           isolated_environment, process_table, same_process,
+                           isolated_environment, process_table, public_diagnostic, same_process,
                            socket_identity)
 
 FAKE = r'''
@@ -306,6 +307,100 @@ class RuntimeTests(unittest.TestCase):
                 with self.assertRaises(OwnershipError):
                     runtime.execute(['/bin/true'], env=runtime.env | {key: value})
             self.assertEqual(runtime._children, [])
+
+    def test_timeout_retains_both_output_streams_and_reaps_the_child(self):
+        runtime = self.context(real=False)
+        script = (
+            "import sys,time; "
+            "print('timeout stdout marker', flush=True); "
+            "print('timeout stderr marker', file=sys.stderr, flush=True); "
+            "time.sleep(30)"
+        )
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            with runtime:
+                runtime.execute([sys.executable, "-c", script], timeout=.2)
+        error = raised.exception
+        self.assertIn("timeout stdout marker", error.stdout)
+        self.assertIn("timeout stderr marker", error.stderr)
+        self.assertEqual(error.stage, Path(sys.executable).name)
+        evidence = Path(error.diagnostic_path)
+        self.assertIn("timeout stdout marker", (evidence / "stdout.txt").read_text())
+        self.assertIn("timeout stderr marker", (evidence / "stderr.txt").read_text())
+        self.assertEqual(json.loads((evidence / "result.json").read_text())["status"], "TIMEOUT")
+        self.assert_stopped(runtime)
+        self.assertIsNone(runtime._lease)
+
+    def test_nonzero_exit_retains_bounded_diagnostics(self):
+        with self.context(real=False) as runtime:
+            result = runtime.execute([
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('x' * 70000 + 'exit stdout marker\\n'); "
+                "print('exit stderr marker', file=sys.stderr); raise SystemExit(7)",
+            ], check=False)
+            self.assertEqual(result.returncode, 7)
+            self.assertIn("exit stdout marker", result.stdout)
+            self.assertIn("exit stderr marker", result.stderr)
+            self.assertLessEqual(len(result.stdout.encode()), 65536)
+            evidence = Path(result.diagnostic_path)
+            record = json.loads((evidence / "result.json").read_text())
+            self.assertEqual(record["status"], "NONZERO")
+            self.assertLessEqual((evidence / "stdout.txt").stat().st_size, 65536)
+            self.assertLessEqual((evidence / "stderr.txt").stat().st_size, 65536)
+
+    def test_cancellation_retains_child_output_without_leaking_processes(self):
+        runtime = self.context(real=False)
+        script = (
+            "import sys,time; "
+            "print('cancel stdout marker', flush=True); "
+            "print('cancel stderr marker', file=sys.stderr, flush=True); "
+            "time.sleep(30)"
+        )
+        timer = threading.Timer(1, os.kill, args=(os.getpid(), signal.SIGTERM))
+        timer.start()
+        with self.assertRaises(KeyboardInterrupt) as raised:
+            try:
+                with runtime:
+                    runtime.execute([sys.executable, "-c", script], timeout=5)
+            finally:
+                timer.cancel()
+        error = raised.exception
+        self.assertIn("cancel stdout marker", error.stdout)
+        self.assertIn("cancel stderr marker", error.stderr)
+        evidence = Path(error.diagnostic_path)
+        self.assertEqual(json.loads((evidence / "result.json").read_text())["status"], "CANCELLED")
+        self.assert_stopped(runtime)
+        self.assertIsNone(runtime._lease)
+
+    def test_timeout_remains_primary_when_cleanup_also_fails(self):
+        runtime = self.context(real=False)
+        runtime.__enter__()
+        original_close = runtime.close
+        def failed_close():
+            original_close()
+            raise OwnershipError("injected cleanup failure")
+        try:
+            with mock.patch.object(runtime, "close", side_effect=failed_close):
+                with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                    runtime.execute([
+                        sys.executable, "-c",
+                        "import sys,time; print('primary marker', flush=True); time.sleep(30)",
+                    ], timeout=.2)
+        finally:
+            original_close()
+        evidence = exception_evidence(raised.exception)
+        self.assertIn("TimeoutExpired", evidence["error"])
+        self.assertIn("injected cleanup failure", evidence["error"])
+        self.assertIn("primary marker", raised.exception.stdout)
+        self.assert_stopped(runtime)
+
+    def test_public_diagnostics_redact_control_values_and_secret_assignments(self):
+        output = public_diagnostic(
+            "use lease-value\ntoken=printed-value\nuseful marker\n",
+            {"HERDR_RUNTIME_LEASE_TOKEN": "lease-value"},
+        )
+        self.assertNotIn("lease-value", output)
+        self.assertNotIn("printed-value", output)
+        self.assertIn("useful marker", output)
 
     def test_every_command_revalidates_routing(self):
         runtime = self.context()

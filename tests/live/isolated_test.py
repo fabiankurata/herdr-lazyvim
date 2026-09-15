@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import time
 
-from owned_session import OwnedSession
+from owned_session import OwnedSession, public_diagnostic
 from runtime_lease import runtime_lease_owner
 from source import new_artifact
 
@@ -22,7 +22,19 @@ def main():
         command = sys.argv[1:]
         if command and Path(command[0]).name in {'make', 'gmake'}:
             command = [command[0], '-C', str(harness), *command[1:]]
-        result = runtime.execute(command, env=env, check=False, timeout=120)
+        try:
+            result = runtime.execute(command, env=env, check=False, timeout=120)
+        except BaseException as error:
+            stage = getattr(error, 'stage', Path(command[0]).name if command else 'unknown')
+            diagnostic = getattr(error, 'diagnostic_path', 'unavailable')
+            print(f'isolated test stage failed: {stage}; retained diagnostics: {diagnostic}', file=sys.stderr)
+            stdout = public_diagnostic(getattr(error, 'stdout', ''), env)
+            stderr = public_diagnostic(getattr(error, 'stderr', ''), env)
+            if stdout:
+                print(stdout, end='' if stdout.endswith('\n') else '\n')
+            if stderr:
+                print(stderr, end='' if stderr.endswith('\n') else '\n', file=sys.stderr)
+            raise
         (artifact / 'stdout.txt').write_text(result.stdout)
         (artifact / 'stderr.txt').write_text(result.stderr)
         print(result.stdout, end='')

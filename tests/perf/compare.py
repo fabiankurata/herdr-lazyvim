@@ -62,10 +62,10 @@ def comment_operations(source, runtime, artifact):
             "SOURCE_REPO": str(source), "FIXTURE_ROOT": str(fixture),
             "HERDR_TEST_STATE_ROOT": str(runtime.root / f"state-{count}"),
             "OPERATION_COUNT": str(count), "OPERATION_RESULT": str(result_path),
+            "HERDR_NVIM_TEST_SCRIPT": str(HARNESS / "tests/nvim/comment_operations.lua"),
         }
         completed = runtime.execute([
-            "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l",
-            str(HARNESS / "tests/nvim/comment_operations.lua"),
+            "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l", str(HARNESS / "tests/nvim/run_test.lua"),
         ], env=env, check=False, timeout=20)
         (artifact / f"stdout-{count}.txt").write_text(completed.stdout)
         (artifact / f"stderr-{count}.txt").write_text(completed.stderr)

@@ -1,3 +1,9 @@
+local version = vim.version()
+assert(version.major > 0 or version.minor >= 10, "Neovim 0.10 or newer is required")
+assert(type(vim.system) == "function", "Neovim must provide vim.system")
+assert(type(vim.uv) == "table", "Neovim must provide vim.uv")
+assert(type(vim.fs.relpath) == "function", "Neovim must provide vim.fs.relpath")
+
 vim.opt.runtimepath:prepend(vim.fn.getcwd() .. "/nvim")
 
 local review = require("herdr_review")

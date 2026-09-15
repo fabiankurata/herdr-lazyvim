@@ -9,6 +9,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y jq neovim
-      - run: make audit
-      - run: make test
+      - name: Install pinned tools
+        env:
+          NVIM_VERSION: v0.10.4
+          NVIM_SHA256: 95aaa8e89473f5421114f2787c13ae0ec6e11ebbd1a13a1bd6fcf63420f8073f
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          curl --fail --location --retry 3 --output nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          echo "${NVIM_SHA256}  nvim.tar.gz" | sha256sum --check --strict
+          sudo tar --extract --gzip --file nvim.tar.gz --directory /opt
+          echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+      - name: Print tested tool versions
+        run: |
+          nvim --version | head -n 3
+          python3 --version
+          git --version
+          jq --version
+      - name: Audit candidate and checked-out HEAD only (shallow checkout)
+        run: PUBLIC_SCAN_HISTORY_RANGE=HEAD make audit
+      - name: Test
+        run: make test
