@@ -207,12 +207,23 @@ def alacritty_census(executable):
     return rows
 
 
+def system_lsof(candidates=(Path("/usr/sbin/lsof"), Path("/usr/bin/lsof"))):
+    for candidate in candidates:
+        try:
+            value = candidate.stat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(value.st_mode) and value.st_uid == 0 and value.st_mode & 0o111:
+            return str(candidate)
+    raise OwnershipError("trusted system lsof is unavailable")
+
+
 def socket_owner(socket):
     value = socket.stat()
     if not stat.S_ISSOCK(value.st_mode):
         raise OwnershipError("configured endpoint is not a socket: " + str(socket))
     result = subprocess.run(
-        ["/usr/sbin/lsof", "-t", "-nP", "-a", "-U", "--", str(socket)],
+        [system_lsof(), "-t", "-nP", "-a", "-U", "--", str(socket)],
         capture_output=True, text=True, timeout=3,
         env={"PATH": os.defpath, "LC_ALL": "C"},
     )
@@ -518,7 +529,7 @@ class WorkspaceFixture:
         pid = process.get("shell_pid")
         if not isinstance(pid, int) or pid <= 0:
             raise OwnershipError("fixture parent PTY owner is unavailable")
-        output = subprocess.run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "0", "-Fn"],
+        output = subprocess.run([system_lsof(), "-a", "-p", str(pid), "-d", "0", "-Fn"],
                                 capture_output=True, text=True, timeout=3, check=True).stdout.splitlines()
         terminals = [line[1:] for line in output if line.startswith("n/dev/tty")]
         if len(terminals) != 1:

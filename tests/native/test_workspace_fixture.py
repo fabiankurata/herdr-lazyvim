@@ -25,7 +25,7 @@ keylog_records = _native_run.keylog_records
 result_exit_code = _native_run.result_exit_code
 from workspace_fixture import (ExistingAlacritty, OwnershipError, UNIX_SOCKET_PATH_MAX, WorkspaceFixture,
                                calibrated_capture_plan, fixture_layout, load_target, nvim_socket_path,
-                               parse_capture_calibration, process_identity, select_window)
+                               parse_capture_calibration, process_identity, select_window, system_lsof)
 from checkpoint import capture_checkpoint, checkpoint_context, stop_viewer, viewer_argv
 import checkpoint
 from viewer_relay import visible_terminal_text
@@ -98,6 +98,14 @@ class FixtureRunner:
 
 
 class WorkspaceFixtureTests(unittest.TestCase):
+    def test_lsof_resolver_accepts_only_an_executable_root_owned_system_candidate(self):
+        missing = Path(self.temp.name) / "missing"
+        candidates = (missing, Path("/usr/sbin/lsof"), Path("/usr/bin/lsof"))
+        expected = next(str(path) for path in candidates if path.exists())
+        self.assertEqual(system_lsof(candidates), expected)
+        with self.assertRaisesRegex(OwnershipError, "trusted system lsof"):
+            system_lsof((missing,))
+
     def test_existing_alacritty_sends_escape_with_the_native_keycode(self):
         client = ExistingAlacritty(TARGET, [])
         with mock.patch.object(client, "verify"), mock.patch.object(client, "_ax", return_value={}) as ax:
