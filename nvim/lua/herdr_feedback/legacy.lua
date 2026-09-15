@@ -709,7 +709,7 @@ local function agent_label(agent, workspace, tabs)
   return string.format("%s · %s%s%s", agent_name(agent), agent.agent_status or "unknown", tab_suffix, last_used)
 end
 
-local function choose_agent(callback, failed)
+local function choose_agent(callback, failed, cancelled)
   local workspace = vim.env.HERDR_WORKSPACE_ID
   local own_pane = vim.env.HERDR_PANE_ID
   if not workspace or workspace == "" then
@@ -718,8 +718,14 @@ local function choose_agent(callback, failed)
     return
   end
   local herdr = vim.env.HERDR_BIN_PATH or "herdr"
+  local function stopped()
+    if not cancelled or not cancelled() then return false end
+    if failed then failed("cancelled", "operation was cancelled") end
+    return true
+  end
   local function scheduled(work)
     vim.schedule(function()
+      if stopped() then return end
       local ok, error = xpcall(work, debug.traceback)
       if not ok and failed then failed("failed", "Herdr discovery failed: " .. tostring(error)) end
     end)
@@ -743,10 +749,13 @@ local function choose_agent(callback, failed)
         notify("No agent is running in this Herdr workspace", vim.log.levels.WARN)
         if failed then failed("failed", "No agent is running in this Herdr workspace") end
       elseif #agents == 1 then
+        if stopped() then return end
         callback(agents[1])
       else
+        if stopped() then return end
         local tabs_started, tabs_error = pcall(vim.system, { herdr, "tab", "list", "--workspace", workspace }, { text = true }, function(tab_result)
           scheduled(function()
+            if stopped() then return end
             local tabs = tab_result.code == 0 and tab_labels(tab_result.stdout) or {}
             vim.ui.select(agents, {
               prompt = "Send review to agent",
@@ -754,6 +763,7 @@ local function choose_agent(callback, failed)
                 return agent_label(agent, workspace, tabs)
               end,
             }, function(agent)
+              if stopped() then return end
               if agent then callback(agent) elseif failed then failed("cancelled", "agent selection was cancelled") end
             end)
           end)
@@ -873,8 +883,8 @@ local function send(options, public, state, finish, root, execution)
             return complete_failure("uncertain", "Delivery outcome is uncertain; comments were kept and will not be resent automatically")
           end
         if state then state.delivery = "confirmed" end
-        local acknowledged = operations.acknowledge(context.review_for_root(origin.root), origin.members, state)
-        if not acknowledged.ok then
+        local called, acknowledged = pcall(operations.acknowledge, context.review_for_root(origin.root), origin.members, state)
+        if not called or not acknowledged.ok then
           notify("Delivery outcome is uncertain; comments were kept because acknowledgement could not be saved", vim.log.levels.WARN)
           if public then return finish({ ok = true, value = { outcome = "delivered_to_input", batch_id = batch_id, warning = "acknowledgement could not be saved" } }) end
           return
@@ -944,7 +954,7 @@ local function send(options, public, state, finish, root, execution)
       if not started then return complete_failure("failed", "could not start Herdr target preflight: " .. tostring(startup_error)) end
       return
     end
-    choose_agent(deliver, complete_failure)
+    choose_agent(deliver, complete_failure, function() return state and (state.finished or state.cancelled) end)
   end
   launch()
 end
