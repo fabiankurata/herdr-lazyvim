@@ -238,6 +238,71 @@ local missing = call(function(done) return feedback.send({ review = review(root)
 assert(not missing.ok and missing.error.code == "failed", "unstartable bundled executable is structured")
 vim.system = original_system
 
+-- A normalization commit during initial reading is not the end of a send
+-- operation: cancellation while bundled discovery waits must still win before
+-- input. The normalized draft remains durable for a later attempt.
+local normalization_root = state_root .. "/normalization-cancel"
+vim.fn.mkdir(normalization_root .. "/.git", "p")
+vim.fn.writefile({ "source" }, normalization_root .. "/example.lua")
+normalization_root = assert(vim.uv.fs_realpath(normalization_root))
+vim.fn.mkdir(vim.fn.stdpath("state") .. "/herdr-review", "p")
+vim.fn.writefile({ vim.json.encode({ version = 1, root = normalization_root, comments = {
+  { file = "example.lua", start = 1, finish = 1, lines = "source", text = "old normalized draft" },
+} }) }, state_path(normalization_root))
+vim.env.HERDR_WORKSPACE_ID, vim.env.HERDR_PANE_ID = "normalization-workspace", "normalization-editor"
+local normalized_pending, normalized_input = {}, 0
+local normalized_system = vim.system
+local normalized_select = vim.ui.select
+vim.ui.select = function(items, _, done) done(items[1]) end
+vim.system = function(argv, _, done)
+  if argv[2] == "agent" and argv[3] == "list" then normalized_pending.agents = done
+  elseif argv[2] == "tab" and argv[3] == "list" then normalized_pending.tabs = done
+  elseif argv[2] == "pane" and argv[3] == "send-text" then normalized_input = normalized_input + 1
+  else error("unexpected normalized command") end
+  return {}
+end
+local normalized_result, normalized_callbacks = nil, 0
+local normalized_operation = feedback.send({ review = review(normalization_root) }, function(value)
+  normalized_callbacks = normalized_callbacks + 1
+  normalized_result = value
+end)
+wait_for(function() return normalized_pending.agents ~= nil end, "normalizing send begins discovery")
+normalized_operation.cancel()
+normalized_pending.agents({ code = 0, stdout = vim.json.encode({ result = { agents = {
+  { workspace_id = "normalization-workspace", pane_id = "agent-one", agent = "one" },
+  { workspace_id = "normalization-workspace", pane_id = "agent-two", agent = "two" },
+} } }), stderr = "" })
+wait_for(function() return normalized_pending.tabs ~= nil end, "cancelled discovery reaches synthetic tab list")
+normalized_pending.tabs({ code = 0, stdout = vim.json.encode({ result = { tabs = {} } }), stderr = "" })
+wait_for(function() return normalized_result ~= nil end, "normalizing cancelled send completes")
+assert(normalized_callbacks == 1 and not normalized_result.ok and normalized_result.error.code == "cancelled" and normalized_input == 0,
+  "normalization does not disable later pre-delivery cancellation")
+local normalized_state = vim.json.decode(table.concat(vim.fn.readfile(state_path(normalization_root)), "\n"))
+assert(#normalized_state.comments == 1 and normalized_state.comments[1].id and normalized_state.comments[1].revision == 1
+    and normalized_state.comments[1].text == "old normalized draft", "cancelled normalization send retains its normalized draft")
+vim.system, vim.ui.select = normalized_system, normalized_select
+
+-- No-target bundled discovery must complete structurally when either child
+-- startup throws. The tab case executes in the scheduled continuation.
+for name, throw_at in pairs({ ["agent-list-startup"] = "agents", ["tab-list-startup"] = "tabs" }) do
+  local system = vim.system
+  vim.system = function(argv, _, done)
+    if argv[2] == "agent" and argv[3] == "list" then
+      if throw_at == "agents" then error("controlled agent-list startup failure") end
+      done({ code = 0, stdout = vim.json.encode({ result = { agents = {
+        { workspace_id = "normalization-workspace", pane_id = "agent-one", agent = "one" },
+        { workspace_id = "normalization-workspace", pane_id = "agent-two", agent = "two" },
+      } } }), stderr = "" })
+      return {}
+    end
+    if argv[2] == "tab" and argv[3] == "list" then error("controlled tab-list startup failure") end
+    error("unexpected discovery command")
+  end
+  local discovery = call(function(done) return feedback.send({ review = review(normalization_root) }, done) end, name)
+  vim.system = system
+  assert(not discovery.ok and discovery.error.code == "failed", name .. " is a structured pre-delivery failure")
+end
+
 -- F2 and F4: explicit target subprocesses retain the invocation executable and
 -- socket, and a post-delivery focus throw cannot lose confirmed completion.
 vim.env.HERDR_SOCKET_PATH = "socket-A"
