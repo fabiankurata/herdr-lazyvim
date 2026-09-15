@@ -154,6 +154,51 @@ local function has_notice(fragment)
   return false
 end
 
+local function temporary_files(root)
+  return vim.fn.glob(state_file(root) .. ".tmp-*", false, true)
+end
+
+local function inject_commit_failure(root, stage)
+  local destination = state_file(root)
+  local real_writefile = vim.fn.writefile
+  local real_write = vim.uv.fs_write
+  local real_close = vim.uv.fs_close
+  local real_rename = vim.uv.fs_rename
+  vim.fn.writefile = function(lines, path, flags)
+    if path == destination then
+      if stage == "write" then real_writefile({ "partial" }, path) end
+      return 1
+    end
+    return real_writefile(lines, path, flags)
+  end
+  vim.uv.fs_write = function(file, data, offset, callback)
+    if not callback and stage == "write" then
+      real_write(file, "partial", offset)
+      return nil, "injected partial write", "EIO"
+    end
+    return real_write(file, data, offset, callback)
+  end
+  vim.uv.fs_close = function(file, callback)
+    if not callback and stage == "close" then
+      real_close(file)
+      return nil, "injected close failure", "EIO"
+    end
+    return real_close(file, callback)
+  end
+  vim.uv.fs_rename = function(source, target, callback)
+    if not callback and stage == "replace" and target == destination then
+      return nil, "injected replacement failure", "EIO"
+    end
+    return real_rename(source, target, callback)
+  end
+  return function()
+    vim.fn.writefile = real_writefile
+    vim.uv.fs_write = real_write
+    vim.uv.fs_close = real_close
+    vim.uv.fs_rename = real_rename
+  end
+end
+
 -- 1. A delayed A send only acknowledges its captured A revision after B becomes active.
 do
   reset_fake()
@@ -324,36 +369,47 @@ do
   equals(after.comments[1].id, ids.one, "selected batch leaves exact unselected ID")
 end
 
--- Durable failure cases: no mutation is acknowledged until the state file accepts it.
+-- Durable failure cases: pre-commit write, close, and replacement failures
+-- must not change the committed state or discard editable text.
+for _, stage in ipairs({ "write", "close", "replace" }) do
+  reset_fake()
+  seed(roots.a, { record(ids.one, "durable") })
+  local review = reload_review()
+  edit_root(roots.a)
+  local original = bytes(roots.a)
+  local restore = inject_commit_failure(roots.a, stage)
+  review.comment(false)
+  local composer = save_composer(stage .. " must fail")
+  vim.wait(30)
+  equals(bytes(roots.a), original, stage .. " failure preserves literal bytes")
+  assert_that(vim.api.nvim_win_is_valid(composer), stage .. " failure retains composer")
+  equals(#temporary_files(roots.a), 0, stage .. " failure cleans owned temporary file")
+  restore()
+  close_composer()
+end
+
 do
   reset_fake()
   seed(roots.a, { record(ids.one, "durable") })
   local review = reload_review()
   edit_root(roots.a)
   local original = bytes(roots.a)
-  local real_write = vim.fn.writefile
-  vim.fn.writefile = function(lines, path, flags)
-    if path == state_file(roots.a) then return 1 end
-    return real_write(lines, path, flags)
-  end
-  review.comment(false)
-  local composer = save_composer("write must fail")
-  vim.wait(30)
-  equals(bytes(roots.a), original, "write failure preserves literal bytes")
-  assert_that(vim.api.nvim_win_is_valid(composer), "write failure retains composer")
-  vim.fn.writefile = real_write
-  close_composer()
-
   local real_delete = vim.fn.delete
+  local real_unlink = vim.uv.fs_unlink
   vim.fn.delete = function(path, flags)
     if path == state_file(roots.a) then return 1 end
     return real_delete(path, flags)
+  end
+  vim.uv.fs_unlink = function(path, callback)
+    if path == state_file(roots.a) then return nil, "injected delete failure", "EIO" end
+    return real_unlink(path, callback)
   end
   review.delete()
   vim.wait(30)
   equals(bytes(roots.a), original, "delete failure preserves literal bytes")
   equals(list_count(review), 1, "delete failure preserves memory")
   vim.fn.delete = real_delete
+  vim.uv.fs_unlink = real_unlink
 end
 
 -- Accepted input is still uncertain when acknowledgement persistence fails.
@@ -366,12 +422,18 @@ do
   choose_one()
   local original = bytes(roots.a)
   local real_delete = vim.fn.delete
+  local real_unlink = vim.uv.fs_unlink
   vim.fn.delete = function(path, flags)
     if path == state_file(roots.a) then return 1 end
     return real_delete(path, flags)
   end
+  vim.uv.fs_unlink = function(path, callback)
+    if path == state_file(roots.a) then return nil, "injected delete failure", "EIO" end
+    return real_unlink(path, callback)
+  end
   ack()
   vim.fn.delete = real_delete
+  vim.uv.fs_unlink = real_unlink
   equals(bytes(roots.a), original, "ack delete failure preserves literal drafts")
   assert_that(has_notice("acknowledgement could not be saved"), "ack delete failure is uncertain")
 
@@ -382,14 +444,13 @@ do
   start_send(review, { annotation_ids = { ids.one } })
   choose_one()
   original = bytes(roots.a)
-  local real_write = vim.fn.writefile
-  vim.fn.writefile = function(lines, path, flags)
-    if path == state_file(roots.a) then return 1 end
-    return real_write(lines, path, flags)
-  end
+  local restore = inject_commit_failure(roots.a, "write")
+  edit_root(roots.b)
+  review.list()
   ack()
-  vim.fn.writefile = real_write
+  restore()
   equals(bytes(roots.a), original, "ack write failure preserves literal drafts")
+  equals(#read(roots.a).comments, 2, "inactive origin retains selected and unselected drafts")
   assert_that(has_notice("acknowledgement could not be saved"), "ack write failure is uncertain")
 end
 

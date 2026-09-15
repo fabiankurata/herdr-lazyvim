@@ -133,33 +133,146 @@ local function read_review(root)
   return records, nil, normalized
 end
 
+local function close_file(file)
+  local ok, result = pcall(vim.uv.fs_close, file)
+  return ok and result and true or false
+end
+
+local function remove_owned_file(path)
+  pcall(vim.uv.fs_unlink, path)
+end
+
 local function write_review(root, records)
+  local path = state_file(root)
   if #records == 0 then
-    local ok, result = pcall(vim.fn.delete, state_file(root))
-    if ok and result == 0 then return true end
+    if not vim.uv.fs_stat(path) then return true end
+    local ok, result = pcall(vim.uv.fs_unlink, path)
+    if ok and result then return true end
     notify("Could not save review comments", vim.log.levels.ERROR); return false
   end
-  local ok, result = pcall(vim.fn.writefile, { vim.json.encode({ version = 1, root = root, comments = records }) }, state_file(root))
-  if not ok or result ~= 0 then notify("Could not save review comments", vim.log.levels.ERROR); return false end
+
+  local temporary = string.format("%s.tmp-%d-%s", path, vim.uv.os_getpid(), random_uuid())
+  local open_ok, file = pcall(vim.uv.fs_open, temporary, "wx", 384)
+  if not open_ok or not file then
+    notify("Could not save review comments", vim.log.levels.ERROR)
+    return false
+  end
+  local contents = vim.json.encode({ version = 1, root = root, comments = records }) .. "\n"
+  local offset = 0
+  while offset < #contents do
+    local write_ok, written = pcall(vim.uv.fs_write, file, contents:sub(offset + 1), offset)
+    if not write_ok or not written or written == 0 then
+      close_file(file)
+      remove_owned_file(temporary)
+      notify("Could not save review comments", vim.log.levels.ERROR)
+      return false
+    end
+    offset = offset + written
+  end
+  if not close_file(file) then
+    remove_owned_file(temporary)
+    notify("Could not save review comments", vim.log.levels.ERROR)
+    return false
+  end
+  local rename_ok, committed = pcall(vim.uv.fs_rename, temporary, path)
+  if not rename_ok or not committed then
+    remove_owned_file(temporary)
+    notify("Could not save review comments", vim.log.levels.ERROR)
+    return false
+  end
   return true
 end
 
-local function load(root)
-  if active_root == root then
-    return true
+local function acquire_review_lock(root)
+  local path = state_file(root) .. ".lock"
+  local deadline = vim.uv.hrtime() + 1000000000
+  repeat
+    local ok, created, _, error_code = pcall(vim.uv.fs_mkdir, path, 448)
+    if ok and created then
+      local lock = { path = path, token = random_uuid() }
+      local owner = vim.json.encode({ pid = vim.uv.os_getpid(), token = lock.token })
+      local owner_ok, owner_result = pcall(vim.fn.writefile, { owner }, path .. "/owner.json")
+      if owner_ok and owner_result == 0 then return lock end
+      remove_owned_file(path .. "/owner.json")
+      pcall(vim.uv.fs_rmdir, path)
+      notify("Could not coordinate review state", vim.log.levels.ERROR)
+      return nil
+    end
+    if not ok or error_code ~= "EEXIST" then
+      notify("Could not coordinate review state", vim.log.levels.ERROR)
+      return nil
+    end
+    local owner_ok, owner = pcall(vim.fn.readfile, path .. "/owner.json")
+    local decode_ok, identity = pcall(vim.json.decode, owner_ok and table.concat(owner, "\n") or "")
+    if decode_ok and type(identity) == "table" and type(identity.pid) == "number" then
+      local _, _, process_error = vim.uv.kill(identity.pid, 0)
+      if process_error == "ESRCH" then
+        local stale = path .. ".stale-" .. random_uuid()
+        if vim.uv.fs_rename(path, stale) then
+          remove_owned_file(stale .. "/owner.json")
+          pcall(vim.uv.fs_rmdir, stale)
+        end
+      end
+    end
+    vim.wait(10)
+  until vim.uv.hrtime() >= deadline
+  notify("Review state is busy; try again", vim.log.levels.WARN)
+  return nil
+end
+
+local function release_review_lock(lock)
+  local owner_ok, owner = pcall(vim.fn.readfile, lock.path .. "/owner.json")
+  local decode_ok, identity = pcall(vim.json.decode, owner_ok and table.concat(owner, "\n") or "")
+  if not decode_ok or type(identity) ~= "table" or identity.token ~= lock.token then
+    notify("Review state lock ownership changed", vim.log.levels.ERROR)
+    return
   end
+  remove_owned_file(lock.path .. "/owner.json")
+  local ok, removed = pcall(vim.uv.fs_rmdir, lock.path)
+  if not ok or not removed then
+    notify("Could not release review state lock", vim.log.levels.ERROR)
+  end
+end
+
+local function update_review(root, update)
+  local lock = acquire_review_lock(root)
+  if not lock then return nil, "review state is busy" end
+  local current, error = read_review(root)
+  if not current then
+    release_review_lock(lock)
+    return nil, error
+  end
+  local update_ok, replacement, update_error = pcall(update, current)
+  if not update_ok then
+    release_review_lock(lock)
+    return nil, replacement
+  end
+  if not replacement then
+    release_review_lock(lock)
+    return nil, update_error
+  end
+  local write_ok, written = pcall(write_review, root, replacement)
+  release_review_lock(lock)
+  if not write_ok or not written then return nil, "could not save review state" end
+  return replacement
+end
+
+local function load(root)
   local loaded, error, normalized = read_review(root)
   if not loaded then
     notify(error, vim.log.levels.ERROR)
     return false
   end
-  if normalized and not write_review(root, loaded) then
-    notify("Could not persist review identities", vim.log.levels.ERROR)
-    return false
+  if normalized then
+    loaded, error = update_review(root, function(current) return current end)
+    if not loaded then
+      notify("Could not persist review identities: " .. error, vim.log.levels.ERROR)
+      return false
+    end
   end
   active_root = root
   comments = loaded
-  return true
+  return true, loaded
 end
 
 local function clear_decorations()
@@ -587,26 +700,19 @@ function M.comment(visual)
     location = location .. " (removed)"
   end
   comment_editor("Comment " .. location, nil, last, function(text)
-    local review_comments, error
-    if active_root == root then
-      review_comments = vim.deepcopy(comments)
-    else
-      review_comments, error = read_review(root)
-    end
+    local review_comments = update_review(root, function(current)
+      table.insert(current, {
+        id = new_comment_id(root, file, first, last, text), revision = 1,
+        file = file,
+        start = first,
+        finish = last,
+        lines = snippet,
+        text = text,
+        removed = removed or nil,
+      })
+      return current
+    end)
     if not review_comments then
-      notify(error, vim.log.levels.ERROR)
-      return false
-    end
-    table.insert(review_comments, {
-      id = new_comment_id(root, file, first, last, text), revision = 1,
-      file = file,
-      start = first,
-      finish = last,
-      lines = snippet,
-      text = text,
-      removed = removed or nil,
-    })
-    if not write_review(root, review_comments) then
       notify("Comment was kept in the composer because it could not be saved", vim.log.levels.ERROR)
       return false
     end
@@ -658,9 +764,17 @@ function M.delete()
       and line >= comment.start
       and line <= comment.finish
     then
-      local remaining = vim.deepcopy(comments)
-      table.remove(remaining, index)
-      if not write_review(active_root, remaining) then
+      local captured = { id = comment.id, revision = comment.revision }
+      local remaining = update_review(active_root, function(current)
+        for persisted_index, persisted in ipairs(current) do
+          if persisted.id == captured.id and persisted.revision == captured.revision then
+            table.remove(current, persisted_index)
+            return current
+          end
+        end
+        return nil, "comment changed before deletion"
+      end)
+      if not remaining then
         notify("Review comment was kept because it could not be saved", vim.log.levels.ERROR)
         return
       end
@@ -678,30 +792,21 @@ local function edit_comment(comment, root)
     or string.format("%d-%d", comment.start, comment.finish)
   local captured = { root = root, id = comment.id, revision = comment.revision }
   comment_editor(string.format("Edit %s:%s", comment.file, range), comment.text, comment.finish, function(text)
-    local review_comments, error
-    if active_root == captured.root then
-      review_comments = vim.deepcopy(comments)
-    else
-      review_comments, error = read_review(captured.root)
-    end
-    if not review_comments then
-      notify(error, vim.log.levels.ERROR)
-      return false
-    end
-    local updated = false
-    for _, current in ipairs(review_comments) do
-      if current.id == captured.id and current.revision == captured.revision then
-        current.text = text
-        current.revision = current.revision + 1
-        updated = true
-        break
+    local review_comments, error = update_review(captured.root, function(current)
+      for _, persisted in ipairs(current) do
+        if persisted.id == captured.id and persisted.revision == captured.revision then
+          persisted.text = text
+          persisted.revision = persisted.revision + 1
+          return current
+        end
       end
-    end
-    if not updated then
+      return nil, "comment changed while editing"
+    end)
+    if not review_comments and error == "comment changed while editing" then
       notify("Comment changed while editing; draft was kept", vim.log.levels.WARN)
       return false
     end
-    if not write_review(captured.root, review_comments) then
+    if not review_comments then
       notify("Edited comment was kept in the composer because it could not be saved", vim.log.levels.ERROR)
       return false
     end
@@ -862,21 +967,21 @@ local function pasted(text)
 end
 
 function M.send(options)
-  if not load(root_for(0)) then return end
-  if #comments == 0 then
+  local root = root_for(0)
+  local loaded, authoritative = load(root)
+  if not loaded then return end
+  if #authoritative == 0 then
     notify("No review comments to send", vim.log.levels.WARN)
     return
   end
-  if not write_review(active_root, comments) then
-    return
-  end
+  comments = authoritative
   options = options or {}
   local requested = {}
   if options.annotation_ids then
     for _, id in ipairs(options.annotation_ids) do requested[id] = true end
   end
   local origin = {
-    root = active_root,
+    root = root,
     window = vim.api.nvim_get_current_win(),
     buffer = vim.api.nvim_get_current_buf(),
     cursor = vim.api.nvim_win_get_cursor(0),
@@ -884,7 +989,7 @@ function M.send(options)
     members = {},
   }
   local batch = {}
-  for _, comment in ipairs(comments) do
+  for _, comment in ipairs(authoritative) do
     if not options.annotation_ids or requested[comment.id] then table.insert(batch, vim.deepcopy(comment)) end
   end
   if #batch == 0 then
@@ -904,16 +1009,14 @@ function M.send(options)
         end
         local selected = {}
         for _, member in ipairs(origin.members) do selected[member.id .. "\0" .. member.revision] = true end
-        local remaining = {}
-        local persisted, error = read_review(origin.root)
-        if not persisted then
-          notify("Delivery outcome is uncertain; comments were kept because review state could not be read: " .. error, vim.log.levels.WARN)
-          return
-        end
-        for _, comment in ipairs(persisted) do
-          if not selected[comment.id .. "\0" .. comment.revision] then table.insert(remaining, comment) end
-        end
-        if not write_review(origin.root, remaining) then
+        local remaining = update_review(origin.root, function(persisted)
+          local kept = {}
+          for _, comment in ipairs(persisted) do
+            if not selected[comment.id .. "\0" .. comment.revision] then table.insert(kept, comment) end
+          end
+          return kept
+        end)
+        if not remaining then
           notify("Delivery outcome is uncertain; comments were kept because acknowledgement could not be saved", vim.log.levels.WARN)
           return
         end

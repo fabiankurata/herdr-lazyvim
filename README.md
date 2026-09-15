@@ -123,6 +123,13 @@ until sent or deleted. Saving or cancelling restores the source window and the
 mode that was active before the editor opened, including the original Visual
 selection.
 
+Review writers coordinate through a short per-worktree lock and replace the
+state file only after a complete temporary-file write and close. A successful
+same-directory rename is the commit point: failures before it preserve the
+previous file. This protects cooperating editor processes and partial-write
+failures, but does not claim power-loss durability beyond the guarantees of the
+host filesystem.
+
 Commented ranges use a connected gutter marker and subtle tint. A wrapped,
 dark review card with a rounded orange border appears below the final selected
 line and identifies the file and complete range. `comment_card_position`,

@@ -25,6 +25,7 @@ test-isolated:
 test-operations:
 	@test -n "$$HERDR_TEST_STATE_ROOT" || { echo 'use make test-operations through the isolated test runner' >&2; exit 1; }
 	HERDR_TEST_FIXTURE_ROOT="$$HERDR_TEST_STATE_ROOT/operations-fixture" HERDR_TEST_REPO="$(CURDIR)" nvim --headless -u NONE -i NONE -l tests/nvim/operations.lua
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/nvim/test_review_concurrency.py -v
 
 live-isolation:
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/live/isolated_test.py bash $(CURDIR)/tests/live/test-isolation
