@@ -1,2 +1,4 @@
 .DS_Store
 *.swp
+artifacts/
+.public-scan-private-denylist

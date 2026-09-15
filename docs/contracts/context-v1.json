@@ -1,0 +1,80 @@
+{
+  "controller_protocol_version": 1,
+  "connection": {
+    "authority": {
+      "host": "fixture-host",
+      "path_authority": "local-posix"
+    },
+    "socket": "/fixture/runtime/server-alpha.sock"
+  },
+  "server_observation": {
+    "connection": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "socket": "/fixture/runtime/server-alpha.sock"
+    },
+    "server_name": "fixture-alpha",
+    "connected": true,
+    "process_identity": null,
+    "capabilities": {
+      "conditional_agent_delivery": false,
+      "cancel_mutation": false
+    }
+  },
+  "workspace_session_key": {
+    "connection": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "socket": "/fixture/runtime/server-alpha.sock"
+    },
+    "workspace_id": "workspace:1",
+    "scope": "workspace"
+  },
+  "tab_session_key": {
+    "connection": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "socket": "/fixture/runtime/server-alpha.sock"
+    },
+    "workspace_id": "workspace:1",
+    "scope": "tab",
+    "tab_id": "tab:1"
+  },
+  "review": {
+    "worktree": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "canonical_root": "/fixture/project with spaces"
+    },
+    "review_id": "draft"
+  },
+  "linked_worktree_review": {
+    "worktree": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "canonical_root": "/fixture/linked-worktree"
+    },
+    "review_id": "draft"
+  },
+  "other_server_session_key": {
+    "connection": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "socket": "/fixture/runtime/server-beta.sock"
+    },
+    "workspace_id": "workspace:1",
+    "scope": "workspace"
+  }
+}

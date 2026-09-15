@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "1c2d8c72-c51f-4d8e-a471-e6e611f74bc6",
+  "batch_id": "b5d09ae2-8da5-4315-8811-11957855ad24",
+  "review": {
+    "worktree": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "canonical_root": "/fixture/project with spaces"
+    },
+    "review_id": "draft"
+  },
+  "acknowledged": [
+    {
+      "id": "16252cb5-dc74-4358-a189-71532cf3a9cb",
+      "revision": 1
+    }
+  ],
+  "outcome": "delivered_to_input",
+  "recorded_at": "2026-01-01T00:00:01Z"
+}

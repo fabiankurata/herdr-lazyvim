@@ -1,0 +1,126 @@
+{
+  "api_version": 1,
+  "name": "ordinary-file",
+  "resolve": {
+    "request": {
+      "buffer": 1,
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      }
+    },
+    "result": {
+      "ok": true,
+      "value": {
+        "worktree": {
+          "authority": {
+            "host": "fixture-host",
+            "path_authority": "local-posix"
+          },
+          "canonical_root": "/fixture/project with spaces"
+        },
+        "relative_path": "src/example.ts",
+        "kind": "working_tree"
+      }
+    }
+  },
+  "capture": {
+    "request": {
+      "location": {
+        "worktree": {
+          "authority": {
+            "host": "fixture-host",
+            "path_authority": "local-posix"
+          },
+          "canonical_root": "/fixture/project with spaces"
+        },
+        "relative_path": "src/example.ts",
+        "kind": "working_tree"
+      },
+      "range": {
+        "version": 1,
+        "kind": "complete_lines",
+        "start_line": 2,
+        "end_line": 3
+      }
+    },
+    "result": {
+      "ok": true,
+      "value": {
+        "location": {
+          "worktree": {
+            "authority": {
+              "host": "fixture-host",
+              "path_authority": "local-posix"
+            },
+            "canonical_root": "/fixture/project with spaces"
+          },
+          "relative_path": "src/example.ts",
+          "kind": "working_tree"
+        },
+        "range": {
+          "version": 1,
+          "kind": "complete_lines",
+          "start_line": 2,
+          "end_line": 3
+        },
+        "lines": [
+          "export const enabled = true;",
+          "export const retries = 2;"
+        ],
+        "context_before": [
+          "// Synthetic fixture."
+        ],
+        "context_after": [
+          ""
+        ],
+        "content_sha256": "b40d80e08443ac860ee3c16d7e1c82421af02b28d3a9c26233bbb0a5a5423ce4"
+      }
+    }
+  },
+  "navigate": {
+    "request": {
+      "source": {
+        "location": {
+          "worktree": {
+            "authority": {
+              "host": "fixture-host",
+              "path_authority": "local-posix"
+            },
+            "canonical_root": "/fixture/project with spaces"
+          },
+          "relative_path": "src/example.ts",
+          "kind": "working_tree"
+        },
+        "range": {
+          "version": 1,
+          "kind": "complete_lines",
+          "start_line": 2,
+          "end_line": 3
+        },
+        "lines": [
+          "export const enabled = true;",
+          "export const retries = 2;"
+        ],
+        "context_before": [
+          "// Synthetic fixture."
+        ],
+        "context_after": [
+          ""
+        ],
+        "content_sha256": "b40d80e08443ac860ee3c16d7e1c82421af02b28d3a9c26233bbb0a5a5423ce4"
+      }
+    },
+    "result": {
+      "ok": true,
+      "value": {
+        "kind": "snapshot",
+        "label": "Captured src/example.ts:2-3",
+        "lines": [
+          "export const enabled = true;",
+          "export const retries = 2;"
+        ]
+      }
+    }
+  }
+}

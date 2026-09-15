@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${HERDR_TEST_AGENT_BYTES:?HERDR_TEST_AGENT_BYTES is required}"
+dd bs=1 2>/dev/null | xxd -p -c 999999 >"$HERDR_TEST_AGENT_BYTES"

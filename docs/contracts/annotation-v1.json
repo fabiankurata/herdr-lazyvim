@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "16252cb5-dc74-4358-a189-71532cf3a9cb",
+  "revision": 1,
+  "review": {
+    "worktree": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "canonical_root": "/fixture/project with spaces"
+    },
+    "review_id": "draft"
+  },
+  "source": {
+    "location": {
+      "worktree": {
+        "authority": {
+          "host": "fixture-host",
+          "path_authority": "local-posix"
+        },
+        "canonical_root": "/fixture/project with spaces"
+      },
+      "relative_path": "src/example.ts",
+      "kind": "working_tree"
+    },
+    "range": {
+      "version": 1,
+      "kind": "complete_lines",
+      "start_line": 2,
+      "end_line": 3
+    },
+    "lines": [
+      "export const enabled = true;",
+      "export const retries = 2;"
+    ],
+    "context_before": [
+      "// Synthetic fixture."
+    ],
+    "context_after": [
+      ""
+    ],
+    "content_sha256": "b40d80e08443ac860ee3c16d7e1c82421af02b28d3a9c26233bbb0a5a5423ce4"
+  },
+  "text": "Explain the retry budget.",
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "deleted": false
+}
