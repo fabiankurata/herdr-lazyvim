@@ -19,6 +19,10 @@ local config = {
   last_agents = {},
 }
 
+local ffi_ok, ffi = pcall(require, "ffi")
+if ffi_ok then pcall(ffi.cdef, "int flock(int fd, int operation);") end
+local retryable_flock_errors = { [4] = true, [11] = true, [35] = true }
+
 local function notify(message, level)
   vim.notify(message, level or vim.log.levels.INFO, { title = "Herdr Review" })
 end
@@ -191,53 +195,53 @@ local function write_review(root, records)
   return true
 end
 
+local function try_review_lock(file)
+  if not ffi_ok then return nil end
+  local call_ok, result = pcall(function() return ffi.C.flock(file, 2 + 4) end)
+  if not call_ok then return nil end
+  if result == 0 then return true end
+  if retryable_flock_errors[ffi.errno()] then return false end
+end
+
 local function acquire_review_lock(root)
-  local path = state_file(root) .. ".lock"
+  local path = state_file(root) .. ".lock-v2"
+  local existing_ok, existing = pcall(vim.uv.fs_lstat, path)
+  if not existing_ok or existing and existing.type ~= "file" then
+    notify("Could not coordinate review state", vim.log.levels.ERROR)
+    return nil
+  end
+  local open_ok, file = pcall(vim.uv.fs_open, path, "a", 384)
+  if not open_ok or not file then
+    notify("Could not coordinate review state", vim.log.levels.ERROR)
+    return nil
+  end
+  local stat_ok, identity = pcall(vim.uv.fs_fstat, file)
+  local uid_ok, uid = pcall(vim.uv.getuid)
+  local chmod_ok, private = pcall(vim.uv.fs_fchmod, file, 384)
+  if not stat_ok or not identity or identity.type ~= "file"
+      or not uid_ok or identity.uid ~= uid or not chmod_ok or not private then
+    close_file(file)
+    notify("Could not coordinate review state", vim.log.levels.ERROR)
+    return nil
+  end
   local deadline = vim.uv.hrtime() + 1000000000
   repeat
-    local ok, created, _, error_code = pcall(vim.uv.fs_mkdir, path, 448)
-    if ok and created then
-      local lock = { path = path, token = random_uuid() }
-      local owner = vim.json.encode({ pid = vim.uv.os_getpid(), token = lock.token })
-      local owner_ok, owner_result = pcall(vim.fn.writefile, { owner }, path .. "/owner.json")
-      if owner_ok and owner_result == 0 then return lock end
-      remove_owned_file(path .. "/owner.json")
-      pcall(vim.uv.fs_rmdir, path)
+    local locked = try_review_lock(file)
+    if locked then return { file = file } end
+    if locked == nil then
+      close_file(file)
       notify("Could not coordinate review state", vim.log.levels.ERROR)
       return nil
-    end
-    if not ok or error_code ~= "EEXIST" then
-      notify("Could not coordinate review state", vim.log.levels.ERROR)
-      return nil
-    end
-    local owner_ok, owner = pcall(vim.fn.readfile, path .. "/owner.json")
-    local decode_ok, identity = pcall(vim.json.decode, owner_ok and table.concat(owner, "\n") or "")
-    if decode_ok and type(identity) == "table" and type(identity.pid) == "number" then
-      local _, _, process_error = vim.uv.kill(identity.pid, 0)
-      if process_error == "ESRCH" then
-        local stale = path .. ".stale-" .. random_uuid()
-        if vim.uv.fs_rename(path, stale) then
-          remove_owned_file(stale .. "/owner.json")
-          pcall(vim.uv.fs_rmdir, stale)
-        end
-      end
     end
     vim.wait(10)
   until vim.uv.hrtime() >= deadline
+  close_file(file)
   notify("Review state is busy; try again", vim.log.levels.WARN)
   return nil
 end
 
 local function release_review_lock(lock)
-  local owner_ok, owner = pcall(vim.fn.readfile, lock.path .. "/owner.json")
-  local decode_ok, identity = pcall(vim.json.decode, owner_ok and table.concat(owner, "\n") or "")
-  if not decode_ok or type(identity) ~= "table" or identity.token ~= lock.token then
-    notify("Review state lock ownership changed", vim.log.levels.ERROR)
-    return
-  end
-  remove_owned_file(lock.path .. "/owner.json")
-  local ok, removed = pcall(vim.uv.fs_rmdir, lock.path)
-  if not ok or not removed then
+  if not close_file(lock.file) then
     notify("Could not release review state lock", vim.log.levels.ERROR)
   end
 end
