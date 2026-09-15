@@ -528,8 +528,13 @@ class OwnedSession:
         result = self.execute([self.herdr, "--session", self.session, *args], check=False)
         self._event("rpc", args=list(args), exit_code=result.returncode,
                     elapsed_ms=(time.monotonic() - started) * 1000)
-        if check:
-            result.check_returncode()
+        if check and result.returncode:
+            failure = subprocess.CalledProcessError(
+                result.returncode, result.args, output=result.stdout, stderr=result.stderr,
+            )
+            failure.stage = result.stage
+            failure.diagnostic_path = result.diagnostic_path
+            raise failure
         return result
 
     def __enter__(self):

@@ -15,7 +15,7 @@ jobs:
           NVIM_SHA256: 95aaa8e89473f5421114f2787c13ae0ec6e11ebbd1a13a1bd6fcf63420f8073f
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq
+          sudo apt-get install -y curl jq
           curl --fail --location --retry 3 --output nvim.tar.gz \
             "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
           echo "${NVIM_SHA256}  nvim.tar.gz" | sha256sum --check --strict

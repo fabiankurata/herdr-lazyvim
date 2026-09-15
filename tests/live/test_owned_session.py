@@ -347,6 +347,17 @@ class RuntimeTests(unittest.TestCase):
             self.assertLessEqual((evidence / "stdout.txt").stat().st_size, 65536)
             self.assertLessEqual((evidence / "stderr.txt").stat().st_size, 65536)
 
+    def test_checked_nonzero_exit_reports_its_diagnostic_location(self):
+        runtime = self.context()
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            with runtime:
+                runtime.run("pane", "list")
+        error = raised.exception
+        self.assertEqual(error.stage, "herdr")
+        self.assertTrue((Path(error.diagnostic_path) / "result.json").exists())
+        self.assertIn("CalledProcessError", exception_evidence(error)["error"])
+        self.assert_stopped(runtime)
+
     def test_cancellation_retains_child_output_without_leaking_processes(self):
         runtime = self.context(real=False)
         script = (

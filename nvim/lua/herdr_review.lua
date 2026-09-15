@@ -151,18 +151,18 @@ local function write_review(root, records)
     notify("Could not save review comments", vim.log.levels.ERROR); return false
   end
 
+  local contents = vim.json.encode({ version = 1, root = root, comments = records }) .. "\n"
   local temporary = string.format("%s.tmp-%d-%s", path, vim.uv.os_getpid(), random_uuid())
   local open_ok, file = pcall(vim.uv.fs_open, temporary, "wx", 384)
   if not open_ok or not file then
     notify("Could not save review comments", vim.log.levels.ERROR)
     return false
   end
-  local contents = vim.json.encode({ version = 1, root = root, comments = records }) .. "\n"
   local offset = 0
   while offset < #contents do
     local write_ok, written = pcall(vim.uv.fs_write, file, contents:sub(offset + 1), offset)
     if not write_ok or not written or written == 0 then
-      close_file(file)
+      if not close_file(file) then pcall(vim.uv.fs_close, file) end
       remove_owned_file(temporary)
       notify("Could not save review comments", vim.log.levels.ERROR)
       return false
@@ -170,6 +170,7 @@ local function write_review(root, records)
     offset = offset + written
   end
   if not close_file(file) then
+    pcall(vim.uv.fs_close, file)
     remove_owned_file(temporary)
     notify("Could not save review comments", vim.log.levels.ERROR)
     return false
