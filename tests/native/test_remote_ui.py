@@ -265,8 +265,8 @@ for line in sys.stdin:
         driver.stdin.write(b"X\n"); driver.stdin.flush()
         self.wait(lambda: json.loads(receipt_path.read_text()).get("rendered"), "driver did not forward input")
         remote_ui.stop_owned(remote_ui.exact_identity(early["ui"]))
-        driver.communicate(timeout=3)
-        self.assertEqual(driver.returncode, 0)
+        stdout, stderr = driver.communicate(timeout=3)
+        self.assertEqual(driver.returncode, 0, (stdout + stderr).decode(errors="replace"))
         self.assertIn(b"input:X", transcript.read_bytes())
         for identity in (early["ui"], early["driver"]):
             with self.assertRaises(ProcessLookupError):

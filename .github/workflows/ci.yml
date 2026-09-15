@@ -16,10 +16,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl jq
-          curl --fail --location --retry 3 --output nvim.tar.gz \
+          nvim_archive="$RUNNER_TEMP/nvim-linux-x86_64.tar.gz"
+          curl --fail --location --retry 3 --output "$nvim_archive" \
             "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
-          echo "${NVIM_SHA256}  nvim.tar.gz" | sha256sum --check --strict
-          sudo tar --extract --gzip --file nvim.tar.gz --directory /opt
+          echo "${NVIM_SHA256}  $nvim_archive" | sha256sum --check --strict
+          sudo tar --extract --gzip --file "$nvim_archive" --directory /opt
           echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
       - name: Print tested tool versions
         run: |

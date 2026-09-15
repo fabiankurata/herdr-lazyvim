@@ -36,7 +36,7 @@ PROFILE_SPEC.loader.exec_module(profile_run)
 
 
 DRIVER = r'''#!/usr/bin/env python3
-import argparse, fcntl, json, os, pty, select, signal, struct, subprocess, sys, termios, time, tty
+import argparse, errno, fcntl, json, os, pty, select, signal, struct, subprocess, sys, termios, time, tty
 from pathlib import Path
 def identity(pid):
  out=subprocess.check_output(["/bin/ps","-p",str(pid),"-o","pid=,lstart=,comm="],text=True).split(None,7)
@@ -60,7 +60,10 @@ try:
    data=os.read(sys.stdin.fileno(),65536)
    if data: os.write(master,data)
   if master in readable:
-   data=os.read(master,65536)
+   try: data=os.read(master,65536)
+   except OSError as error:
+    if error.errno==errno.EIO: break
+    raise
    if not data: break
    if a.recording_path.read_text() == "on\n": captured.extend(data)
    os.write(sys.stdout.fileno(),data); tail=(tail+data)[-8:]
