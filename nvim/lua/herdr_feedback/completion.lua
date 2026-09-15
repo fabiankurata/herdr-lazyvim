@@ -3,7 +3,7 @@ local M = {}
 function M.scheduled(done, work)
   local state = { finished = false, cancelled = false, mutation = "open", delivery = "not_started" }
   function state:cancelled_before_commit()
-    return self.cancelled and self.mutation == "open"
+    return self.cancelled and self.mutation ~= "committing"
   end
   function state:begin_commit()
     if self:cancelled_before_commit() then return false end
@@ -27,7 +27,7 @@ function M.scheduled(done, work)
     if value ~= nil then finish(value) end
   end)
   return { cancel = function()
-    if not state.finished and state.mutation ~= "committed" then state.cancelled = true end
+    if not state.finished then state.cancelled = true end
   end }, state, finish
 end
 

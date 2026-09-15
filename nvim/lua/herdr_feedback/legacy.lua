@@ -718,8 +718,14 @@ local function choose_agent(callback, failed)
     return
   end
   local herdr = vim.env.HERDR_BIN_PATH or "herdr"
-  vim.system({ herdr, "agent", "list" }, { text = true }, function(result)
+  local function scheduled(work)
     vim.schedule(function()
+      local ok, error = xpcall(work, debug.traceback)
+      if not ok and failed then failed("failed", "Herdr discovery failed: " .. tostring(error)) end
+    end)
+  end
+  local started, startup_error = pcall(vim.system, { herdr, "agent", "list" }, { text = true }, function(result)
+    scheduled(function()
       if result.code ~= 0 then
         notify("Herdr did not return the workspace agents", vim.log.levels.ERROR)
         if failed then failed("failed", "Herdr did not return the workspace agents") end
@@ -739,8 +745,8 @@ local function choose_agent(callback, failed)
       elseif #agents == 1 then
         callback(agents[1])
       else
-        vim.system({ herdr, "tab", "list", "--workspace", workspace }, { text = true }, function(tab_result)
-          vim.schedule(function()
+        local tabs_started, tabs_error = pcall(vim.system, { herdr, "tab", "list", "--workspace", workspace }, { text = true }, function(tab_result)
+          scheduled(function()
             local tabs = tab_result.code == 0 and tab_labels(tab_result.stdout) or {}
             vim.ui.select(agents, {
               prompt = "Send review to agent",
@@ -752,9 +758,11 @@ local function choose_agent(callback, failed)
             end)
           end)
         end)
+        if not tabs_started and failed then failed("failed", "could not start Herdr tab discovery: " .. tostring(tabs_error)) end
       end
     end)
   end)
+  if not started and failed then failed("failed", "could not start Herdr agent discovery: " .. tostring(startup_error)) end
 end
 
 local function pasted(text)
