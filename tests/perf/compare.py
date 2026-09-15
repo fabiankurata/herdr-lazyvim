@@ -165,7 +165,8 @@ def main():
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--candidate", required=True)
-    parser.add_argument("--samples", type=int, choices=(30, 100), default=30)
+    parser.add_argument("--samples", type=int, choices=(1, 30, 100), default=30,
+                        help="1 is a smoke check; comparable evidence requires 30 or 100")
     parser.add_argument("--artifact-dir", type=Path)
     args = parser.parse_args()
     artifact = None
@@ -240,7 +241,12 @@ def main():
         return 1
 
 
-if __name__ == "__main__":
+def owned_main():
+    """Run the public comparator as a lease owner or verified borrower."""
     from runtime_lease import runtime_lease_owner
-    with runtime_lease_owner(repo=Path(__file__).resolve().parents[2]):
-        sys.exit(main())
+    with runtime_lease_owner(repo=HARNESS):
+        return main()
+
+
+if __name__ == "__main__":
+    sys.exit(owned_main())

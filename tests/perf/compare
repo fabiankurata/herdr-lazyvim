@@ -4,6 +4,6 @@ import sys
 
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 sys.dont_write_bytecode = True
-from compare import main
+from compare import owned_main
 
-sys.exit(main())
+sys.exit(owned_main())

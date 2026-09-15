@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -33,11 +34,27 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(stats['metrics'], {})
 
     def test_interleaved_current_callable_on_exact_archives_without_old_harness(self):
-        root = compare.HARNESS
-        baseline = '488f4c543ed7ba0937b8a8725ef438b79112c800'
-        candidate = compare.git(root, 'rev-parse', 'HEAD')
         with tempfile.TemporaryDirectory(prefix='hf-', dir='/tmp') as directory:
-            out = Path(directory)
+            root = Path(directory) / 'repository'
+            root.mkdir()
+            def git(*arguments):
+                return subprocess.check_output(['git', *arguments], cwd=root, text=True).strip()
+            subprocess.run(['git', 'init', '--quiet'], cwd=root, check=True)
+            subprocess.run(['git', 'config', 'user.email', 'archive@example.invalid'], cwd=root, check=True)
+            subprocess.run(['git', 'config', 'user.name', 'Archive Fixture'], cwd=root, check=True)
+            pane = root / 'herdr/pane.sh'
+            pane.parent.mkdir()
+            pane.write_text('baseline source\n')
+            subprocess.run(['git', 'add', '.'], cwd=root, check=True)
+            subprocess.run(['git', 'commit', '--quiet', '-m', 'baseline'], cwd=root, check=True)
+            baseline = git('rev-parse', 'HEAD')
+            baseline_tree = git('rev-parse', 'HEAD^{tree}')
+            pane.write_text('candidate source revision\n')
+            subprocess.run(['git', 'commit', '--quiet', '-am', 'candidate'], cwd=root, check=True)
+            candidate = git('rev-parse', 'HEAD')
+            candidate_tree = git('rev-parse', 'HEAD^{tree}')
+            out = Path(directory) / 'out'
+            out.mkdir()
             seen = []
             def measure(source, runtime, artifact):
                 self.assertTrue((source / 'herdr/pane.sh').exists())
@@ -45,12 +62,17 @@ class ComparisonTests(unittest.TestCase):
                 if len(seen) == 2:
                     raise TimeoutError('observed workload failure')
                 return {'status': 'PASS', 'metrics': {'actual_fixture_work': len((source / 'herdr/pane.sh').read_bytes())}}
-            observations = compare.run_pairs(root, baseline, candidate, 2, out, measure=measure)
+            with contextlib.chdir(compare.HARNESS):
+                observations = compare.run_pairs(root, baseline, candidate, 2, out, measure=measure)
             self.assertEqual([item['side'] for item in observations], ['baseline', 'candidate', 'candidate', 'baseline'])
             self.assertEqual(observations[1]['status'], 'FAIL')
             self.assertIn('TimeoutError', observations[1]['error'])
             self.assertEqual(len(json.loads((out / 'observations.json').read_text())), 4)
             self.assertTrue(all('tree' in item and 'archive_sha256' in item for item in observations))
+            self.assertEqual({item['revision'] for item in observations if item['side'] == 'baseline'}, {baseline})
+            self.assertEqual({item['revision'] for item in observations if item['side'] == 'candidate'}, {candidate})
+            self.assertEqual({item['tree'] for item in observations}, {baseline_tree, candidate_tree})
+            self.assertEqual(len({item['archive_sha256'] for item in observations}), 2)
             controls = list(out.glob('sample-*/owned-session-*/update-control.json'))
             self.assertEqual(len(controls), 4)
             self.assertTrue(all(json.loads(path.read_text())['applied'] == {
