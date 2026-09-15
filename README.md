@@ -123,6 +123,16 @@ until sent or deleted. Saving or cancelling restores the source window and the
 mode that was active before the editor opened, including the original Visual
 selection.
 
+Review writers coordinate through a kernel-released file lock held across the
+complete read, update, and replacement transaction. Process termination closes
+the lock descriptor, so abandoned owner metadata or pathname reclamation cannot
+block or displace another writer. The stable lock file is not an ownership
+record and remains on disk after release. The state file changes only after a
+complete temporary-file write and close. A successful same-directory rename is
+the commit point: failures before it preserve the previous file. This protects
+cooperating editor processes and partial-write failures, but does not claim
+power-loss durability beyond the guarantees of the host filesystem.
+
 Commented ranges use a connected gutter marker and subtle tint. A wrapped,
 dark review card with a rounded orange border appears below the final selected
 line and identifies the file and complete range. `comment_card_position`,

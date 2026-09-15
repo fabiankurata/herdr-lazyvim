@@ -1,0 +1,51 @@
+{
+  "controller_protocol_version": 1,
+  "session_id": "a99f8bf3-df7e-4972-b45e-b292fb6d375a",
+  "session_key": {
+    "connection": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "socket": "/fixture/runtime/server-alpha.sock"
+    },
+    "workspace_id": "workspace:1",
+    "scope": "workspace"
+  },
+  "owner_token": "synthetic-handshake-token",
+  "config_generation": 1,
+  "observed_state": "Visible",
+  "view": {
+    "pane_id": "pane:3",
+    "host_tab_id": "tab:1",
+    "return_focus_pane_id": "pane:2",
+    "placement": "split",
+    "content_dimensions": {
+      "columns": 80,
+      "rows": 24
+    },
+    "owned_effects": []
+  },
+  "operation": {
+    "invocation_id": "961c5957-4079-46f0-9d71-d8e981cb2c24",
+    "requested_action": "toggle",
+    "desired_action": "hide",
+    "phase": "Reconciling",
+    "unresolved_effect": {
+      "kind": "move",
+      "from_tab": "tab:1",
+      "to_tab": "owned-parking:1"
+    },
+    "guarded_tabs": [
+      "owned-parking:1",
+      "tab:1"
+    ],
+    "outcome": "uncertain"
+  },
+  "editor_identity": {
+    "token": "synthetic-handshake-token",
+    "handshake_verified": false,
+    "pid": null,
+    "start_identity": null
+  }
+}

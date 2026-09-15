@@ -1,6 +1,16 @@
+local version = vim.version()
+assert(version.major > 0 or version.minor >= 10, "Neovim 0.10 or newer is required")
+assert(type(vim.system) == "function", "Neovim must provide vim.system")
+assert(type(vim.uv) == "table", "Neovim must provide vim.uv")
+
 vim.opt.runtimepath:prepend(vim.fn.getcwd() .. "/nvim")
 
 local review = require("herdr_review")
+local native_relpath = vim.fs.relpath
+vim.fs.relpath = nil
+assert(review._relative_path("/tmp/project", "/tmp/project/lua/file.lua") == "lua/file.lua", "Neovim 0.10 must resolve project-relative paths")
+assert(review._relative_path("/tmp/project", "/tmp/project-other/file.lua") == nil, "relative fallback must reject sibling prefixes")
+vim.fs.relpath = native_relpath
 local payload = review._format_comments({
   { file = "b.ts", start = 9, finish = 10, lines = "old\nlines", text = "replace this", removed = true },
   { file = "a.go", start = 3, finish = 3, lines = "return nil", text = "handle the error", removed = false },

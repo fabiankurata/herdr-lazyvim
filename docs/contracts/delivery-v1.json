@@ -1,0 +1,43 @@
+{
+  "api_version": 1,
+  "id": "b5d09ae2-8da5-4315-8811-11957855ad24",
+  "review": {
+    "worktree": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "canonical_root": "/fixture/project with spaces"
+    },
+    "review_id": "draft"
+  },
+  "members": [
+    {
+      "id": "16252cb5-dc74-4358-a189-71532cf3a9cb",
+      "revision": 1
+    }
+  ],
+  "payload": "src/example.ts:2-3\n```\nexport const enabled = true;\nexport const retries = 2;\n```\nExplain the retry budget.\n",
+  "target": {
+    "connection": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "socket": "/fixture/runtime/server-alpha.sock"
+    },
+    "workspace_id": "workspace:1",
+    "tab_id": "tab:1",
+    "pane_id": "pane:2",
+    "agent_session_id": "agent:synthetic",
+    "worktree": {
+      "authority": {
+        "host": "fixture-host",
+        "path_authority": "local-posix"
+      },
+      "canonical_root": "/fixture/project with spaces"
+    }
+  },
+  "submit": false,
+  "strict_session_guard": true
+}
