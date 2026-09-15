@@ -31,7 +31,7 @@ function M.new_id()
   return uuid()
 end
 
-local function records_for(review)
+local function records_for(review, control)
   local records, error = store.read(review)
   if not records then return nil, failure("invalid_state", error) end
   local _, changed = M.normalize(records)
@@ -39,7 +39,8 @@ local function records_for(review)
     local normalized, update_error = store.update(review, function(current)
       M.normalize(current)
       return current, vim.deepcopy(current)
-    end)
+    end, control)
+    if store.is_cancelled(update_error) then return nil, failure("cancelled", "operation was cancelled") end
     if not normalized then return nil, failure("write_failed", update_error) end
     return normalized
   end
@@ -47,32 +48,33 @@ local function records_for(review)
   return records
 end
 
-function M.list(request)
+function M.list(request, control)
   local review, error = context.validate_review(type(request) == "table" and request.review)
   if not review then return failure("invalid_request", error) end
-  local records, failed = records_for(review); if not records then return failed end
+  local records, failed = records_for(review, control); if not records then return failed end
   return success(vim.deepcopy(records))
 end
 
-function M.add_captured(captured, text)
+function M.add_captured(captured, text, control)
   local source = captured.source
   local record, error = store.update(captured.review, function(records)
     M.normalize(records)
     local created = { id = uuid(), revision = 1, file = source.file, start = source.start, finish = source.finish, lines = source.lines, text = text, removed = source.removed or nil }
     table.insert(records, created)
     return records, vim.deepcopy(created)
-  end)
+  end, control)
+  if store.is_cancelled(error) then return failure("cancelled", "operation was cancelled") end
   if not record then return failure("write_failed", error) end
   return success(record)
 end
 
-function M.add(request)
+function M.add(request, control)
   local captured, error = context.capture(request)
   if not captured then return failure("invalid_request", error) end
-  return M.add_captured(captured, request.text)
+  return M.add_captured(captured, request.text, control)
 end
 
-local function existing(operation, id, request)
+local function existing(operation, id, request, control)
   if type(id) ~= "string" or type(request) ~= "table" then return failure("invalid_request", operation .. " requires an id and request") end
   local review, error = context.validate_review(request.review)
   if not review then return failure("invalid_request", error) end
@@ -94,15 +96,16 @@ local function existing(operation, id, request)
       end
     end
     return false, failure("not_found", "annotation was not found")
-  end)
+  end, control)
+  if store.is_cancelled(write_error) then return failure("cancelled", "operation was cancelled") end
   if not result then return failure("write_failed", write_error) end
   return result
 end
-function M.edit(id, request) return existing("edit", id, request) end
-function M.delete(id, request) return existing("delete", id, request) end
+function M.edit(id, request, control) return existing("edit", id, request, control) end
+function M.delete(id, request, control) return existing("delete", id, request, control) end
 
-function M.export(request)
-  local listed = M.list(request); if not listed.ok then return listed end
+function M.export(request, control)
+  local listed = M.list(request, control); if not listed.ok then return listed end
   local requested = {}
   if request.annotation_ids then
     if type(request.annotation_ids) ~= "table" then return failure("invalid_request", "annotation_ids must be a list") end
@@ -122,7 +125,7 @@ function M.export(request)
   return success({ api_version = 1, id = uuid(), review = review, members = members, records = vim.deepcopy(records), payload = table.concat(blocks, "\n\n") })
 end
 
-function M.acknowledge(review, members)
+function M.acknowledge(review, members, control)
   if type(members) ~= "table" then return failure("invalid_request", "delivery members must be a list") end
   local selected = {}
   for _, member in ipairs(members) do
@@ -138,7 +141,8 @@ function M.acknowledge(review, members)
       if not selected[record.id .. "\0" .. record.revision] then table.insert(remaining, record) end
     end
     return remaining, vim.deepcopy(members)
-  end)
+  end, control)
+  if store.is_cancelled(write_error) then return failure("cancelled", "operation was cancelled") end
   if not acknowledged then return failure("write_failed", write_error) end
   return success({ acknowledged = acknowledged })
 end

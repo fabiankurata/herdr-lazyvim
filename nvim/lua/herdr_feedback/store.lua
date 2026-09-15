@@ -1,5 +1,7 @@
 local context = require("herdr_feedback.context")
 local M = {}
+local CANCELLED = {}
+local acquire_lock
 
 local ffi_ok, ffi = pcall(require, "ffi")
 if ffi_ok then pcall(ffi.cdef, "int flock(int fd, int operation);") end
@@ -53,38 +55,94 @@ local function read_path(path, root)
   return value.comments, nil
 end
 
-local function write_path(path, root, comments)
+local function cancelled(control)
+  return control and control.cancelled_before_commit and control:cancelled_before_commit()
+end
+
+local function begin_commit(control)
+  if not control then return true end
+  return control:begin_commit()
+end
+
+local function abort_commit(control)
+  if control and control.abort_commit then control:abort_commit() end
+end
+
+local function finish_commit(control)
+  if control and control.finish_commit then control:finish_commit() end
+end
+
+local function write_path(path, root, comments, control)
   if #comments == 0 then
     if not vim.uv.fs_stat(path) then return true end
+    if not begin_commit(control) then return nil, CANCELLED end
     local ok, removed = pcall(vim.uv.fs_unlink, path)
-    if ok and removed then return true end
+    if ok and removed then finish_commit(control); return true end
+    abort_commit(control)
     return nil, "could not save review comments"
   end
-  local contents = vim.json.encode({ version = 1, root = root, comments = comments }) .. "\n"
-  local temporary = string.format("%s.tmp-%d-%s", path, vim.uv.os_getpid(), uuid())
-  local open_ok, file = pcall(vim.uv.fs_open, temporary, "wx", 384)
-  if not open_ok or not file then return nil, "could not save review comments" end
-  local offset = 0
-  while offset < #contents do
-    local write_ok, written = pcall(vim.uv.fs_write, file, contents:sub(offset + 1), offset)
-    if not write_ok or not written or written == 0 then
-      if not close_file(file) then pcall(vim.uv.fs_close, file) end
-      remove_owned_file(temporary)
-      return nil, "could not save review comments"
+  local temporary, file, closed
+  local ok, written, write_error = xpcall(function()
+    local contents = vim.json.encode({ version = 1, root = root, comments = comments }) .. "\n"
+    temporary = string.format("%s.tmp-%d-%s", path, vim.uv.os_getpid(), uuid())
+    local open_ok
+    open_ok, file = pcall(vim.uv.fs_open, temporary, "wx", 384)
+    if not open_ok or not file then return nil, "could not save review comments" end
+    local offset = 0
+    while offset < #contents do
+      local write_ok, count = pcall(vim.uv.fs_write, file, contents:sub(offset + 1), offset)
+      if not write_ok or not count or count == 0 then return nil, "could not save review comments" end
+      offset = offset + count
     end
-    offset = offset + written
+    if not close_file(file) then return nil, "could not save review comments" end
+    closed, file = true, nil
+    if not begin_commit(control) then return nil, CANCELLED end
+    local rename_ok, committed = pcall(vim.uv.fs_rename, temporary, path)
+    if not rename_ok or not committed then abort_commit(control); return nil, "could not save review comments" end
+    finish_commit(control)
+    return true
+  end, debug.traceback)
+  if file and not closed then close_file(file) end
+  if temporary then remove_owned_file(temporary) end
+  if not ok then return nil, written end
+  if not written and write_error ~= CANCELLED then abort_commit(control) end
+  return written, write_error
+end
+
+function M.is_cancelled(error)
+  return error == CANCELLED
+end
+
+function M.update(review, callback, control)
+  local path, root = M.path(review)
+  if not path then return nil, root end
+  local lock, lock_error = acquire_lock(path)
+  if not lock then return nil, lock_error end
+  local ok, succeeded, value, failure = xpcall(function()
+    if cancelled(control) then return false, nil, CANCELLED end
+    local comments, read_error = read_path(path, root)
+    if not comments then return false, nil, read_error end
+    local called, replacement, callback_value, callback_error = pcall(callback, comments)
+    if not called then error(replacement) end
+    if replacement == false then return true, callback_value, nil end
+    if replacement == nil then return false, nil, callback_error or callback_value end
+    if cancelled(control) then return false, nil, CANCELLED end
+    local written, write_error = write_path(path, root, replacement, control)
+    if not written then return false, nil, write_error end
+    return true, callback_value, nil
+  end, debug.traceback)
+  local closed = close_file(lock)
+  if not ok then
+    if not closed then return nil, value .. "; additionally could not release review-state lock" end
+    return nil, value
   end
-  if not close_file(file) then
-    pcall(vim.uv.fs_close, file)
-    remove_owned_file(temporary)
-    return nil, "could not save review comments"
+  if not succeeded then
+    if not closed and failure ~= CANCELLED then return nil, tostring(failure) .. "; additionally could not release review-state lock" end
+    return nil, failure
   end
-  local rename_ok, committed = pcall(vim.uv.fs_rename, temporary, path)
-  if not rename_ok or not committed then
-    remove_owned_file(temporary)
-    return nil, "could not save review comments"
-  end
-  return true
+  -- A close failure after a successful rename/unlink cannot make the durable
+  -- commit disappear, so report the committed value rather than a false refusal.
+  return value, nil
 end
 
 local function try_lock(file)
@@ -95,7 +153,7 @@ local function try_lock(file)
   if retryable_flock_errors[ffi.errno()] then return false end
 end
 
-local function acquire_lock(path)
+acquire_lock = function(path)
   local lock_path = path .. ".lock-v2"
   local existing_ok, existing = pcall(vim.uv.fs_lstat, lock_path)
   if not existing_ok or existing and existing.type ~= "file" then return nil, "could not coordinate review state" end
@@ -125,24 +183,6 @@ function M.read(review)
   if not path then return nil, root end
   local comments, error = read_path(path, root)
   return comments, error, path, root
-end
-
--- Holds a kernel-released lock over the authoritative read and replacement.
-function M.update(review, callback)
-  local path, root = M.path(review)
-  if not path then return nil, root end
-  local lock, lock_error = acquire_lock(path)
-  if not lock then return nil, lock_error end
-  local comments, read_error = read_path(path, root)
-  if not comments then close_file(lock); return nil, read_error end
-  local called, replacement, value, callback_error = pcall(callback, comments)
-  if not called then close_file(lock); return nil, replacement end
-  if replacement == false then close_file(lock); return value, nil end
-  if replacement == nil then close_file(lock); return nil, callback_error or value end
-  local written, write_error = write_path(path, root, replacement)
-  close_file(lock)
-  if not written then return nil, write_error end
-  return value, nil
 end
 
 function M.write(review, comments)

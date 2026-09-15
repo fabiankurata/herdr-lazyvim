@@ -779,7 +779,23 @@ local function matches_target(agent, target)
     and listed_agent_session_id(agent) == target.agent_session_id
 end
 
-local function send(options, public, state, finish, root)
+local routing_selectors = {
+  "HERDR_SOCKET_PATH", "HERDR_SESSION", "HERDR_SERVER_SESSION", "HERDR_CLIENT_SOCKET_PATH", "HERDR_CONFIG_PATH",
+}
+
+local function explicit_execution(target)
+  local socket = target and target.connection and target.connection.socket
+  if type(socket) ~= "string" or socket == "" then return nil end
+  local environment = vim.fn.environ()
+  for _, key in ipairs(routing_selectors) do environment[key] = nil end
+  environment.HERDR_SOCKET_PATH = socket
+  return {
+    executable = vim.env.HERDR_BIN_PATH or "herdr",
+    options = { text = true, clear_env = true, env = environment },
+  }
+end
+
+local function send(options, public, state, finish, root, execution)
   local records, error
   if public then
     records, error = read_review(root)
@@ -833,12 +849,12 @@ local function send(options, public, state, finish, root)
   local function deliver(agent)
     if state and state.cancelled then return complete_failure("cancelled", "operation was cancelled") end
     if input_started then return end
-    input_started = true
-    local herdr = vim.env.HERDR_BIN_PATH or "herdr"
-    if state then state.delivery_started = true end
+    local herdr = execution and execution.executable or vim.env.HERDR_BIN_PATH or "herdr"
     local input = pasted(payload) .. (options.submit and "\r" or "")
-    vim.system({ herdr, "pane", "send-text", agent.pane_id, input }, { text = true }, function(result)
+    local command_options = execution and vim.deepcopy(execution.options) or { text = true }
+    local started, startup_error = pcall(vim.system, { herdr, "pane", "send-text", agent.pane_id, input }, command_options, function(result)
         vim.schedule(function()
+          if state and state.finished then return end
           if delivery_finished then return end
           delivery_finished = true
           if result.code ~= 0 then
@@ -847,36 +863,40 @@ local function send(options, public, state, finish, root)
             end
             return complete_failure("uncertain", "Delivery outcome is uncertain; comments were kept and will not be resent automatically")
           end
-        local acknowledged = operations.acknowledge(context.review_for_root(origin.root), origin.members)
+        if state then state.delivery = "confirmed" end
+        local acknowledged = operations.acknowledge(context.review_for_root(origin.root), origin.members, state)
         if not acknowledged.ok then
           notify("Delivery outcome is uncertain; comments were kept because acknowledgement could not be saved", vim.log.levels.WARN)
           if public then return finish({ ok = true, value = { outcome = "delivered_to_input", batch_id = batch_id, warning = "acknowledgement could not be saved" } }) end
           return
         end
-        local remaining, read_error = read_review(origin.root)
-        if not remaining then
-          notify("Delivery outcome is uncertain; comments were kept because review state could not be read: " .. read_error, vim.log.levels.WARN)
-          if public then return finish({ ok = true, value = { outcome = "delivered_to_input", batch_id = batch_id, warning = "review state could not be read" } }) end
-          return
+        local post_ok, post_error = pcall(function()
+          local remaining, read_error = read_review(origin.root)
+          if not remaining then error("review state could not be read: " .. read_error) end
+          config.last_agents[agent.workspace_id] = agent.pane_id
+          save_last_agents()
+          if active_root == origin.root then comments = remaining; clear_decorations(); refresh() end
+          notify(string.format("Pasted %d comment%s to %s; agent execution is not confirmed", count, count == 1 and "" or "s", agent_name(agent)))
+          local focus_options = execution and vim.deepcopy(execution.options) or { text = true }
+          vim.system({ herdr, "agent", "focus", agent.pane_id }, focus_options)
+        end)
+        if public then
+          local value = { outcome = "delivered_to_input", batch_id = batch_id, members = origin.members }
+          if not post_ok then value.warning = "post-delivery UI update failed: " .. tostring(post_error) end
+          finish({ ok = true, value = value })
         end
-        config.last_agents[agent.workspace_id] = agent.pane_id
-        save_last_agents()
-        if active_root == origin.root then
-          comments = remaining
-          clear_decorations()
-          refresh()
-        end
-        notify(string.format("Pasted %d comment%s to %s; agent execution is not confirmed", count, count == 1 and "" or "s", agent_name(agent)))
-        vim.system({ herdr, "agent", "focus", agent.pane_id }, { text = true })
-        if public then finish({ ok = true, value = { outcome = "delivered_to_input", batch_id = batch_id, members = origin.members } }) end
       end)
     end)
+    if not started then return complete_failure("failed", "could not start Herdr delivery: " .. tostring(startup_error)) end
+    input_started = true
+    if state then state.delivery_started = true; state.delivery = "started" end
   end
   local function launch()
     if public and options.target then
       local target = vim.deepcopy(options.target)
-      local herdr = vim.env.HERDR_BIN_PATH or "herdr"
-      vim.system({ herdr, "agent", "list" }, { text = true }, function(result)
+      local herdr = execution and execution.executable or vim.env.HERDR_BIN_PATH or "herdr"
+      local command_options = execution and vim.deepcopy(execution.options) or { text = true }
+      local started, startup_error = pcall(vim.system, { herdr, "agent", "list" }, command_options, function(result)
         if preflight_finished then return end
         preflight_finished = true
         vim.schedule(function()
@@ -901,6 +921,7 @@ local function send(options, public, state, finish, root)
           return complete_failure("target_mismatch", "the requested target is not the current Herdr occupant")
         end)
       end)
+      if not started then return complete_failure("failed", "could not start Herdr target preflight: " .. tostring(startup_error)) end
       return
     end
     choose_agent(deliver, complete_failure)
@@ -912,12 +933,16 @@ function M.send(options, done)
   options = options or {}
   if type(done) ~= "function" then return send(options, false) end
   local copied = vim.deepcopy(options)
+  local execution = copied.target and explicit_execution(copied.target)
+  if copied.target and not execution then
+    return operations.scheduled(done, function() return operations.failure("unsupported_capability", "the bundled Herdr boundary cannot route to the requested connection") end)
+  end
   local root, error = store.root(copied.review)
   if not root then
     return operations.scheduled(done, function() return operations.failure("invalid_request", error) end)
   end
   return operations.scheduled(done, function(state, finish)
-    return send(copied, true, state, finish, root)
+    return send(copied, true, state, finish, root, execution)
   end)
 end
 
@@ -939,7 +964,7 @@ function M.validate_setup(opts)
     keymaps = function(value) return type(value) == "boolean" or nil, "keymaps must be a boolean" end,
     comment_completion = function(value) return type(value) == "boolean" or nil, "comment_completion must be a boolean" end,
     comment_display = function(value) return one_of(value, "comment_display", { card = true, eol = true }) end,
-    comment_range_style = function(value) return one_of(value, "comment_range_style", { subtle = true, selection = true }) end,
+    comment_range_style = function(value) return one_of(value, "comment_range_style", { subtle = true, selection = true, gutter = true }) end,
     comment_card_position = function(value) return one_of(value, "comment_card_position", { above = true, below = true }) end,
     comment_card_width = function(value) return type(value) == "number" and value % 1 == 0 and value > 0 or nil, "comment_card_width must be a positive integer" end,
     comment_card_background = function(value) return color(value, "comment_card_background", true) end,

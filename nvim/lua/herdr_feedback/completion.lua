@@ -1,7 +1,19 @@
 local M = {}
 
 function M.scheduled(done, work)
-  local state = { finished = false, cancelled = false, committed = false }
+  local state = { finished = false, cancelled = false, mutation = "open", delivery = "not_started" }
+  function state:cancelled_before_commit()
+    return self.cancelled and self.mutation == "open"
+  end
+  function state:begin_commit()
+    if self:cancelled_before_commit() then return false end
+    self.mutation = "committing"
+    return true
+  end
+  function state:finish_commit() self.mutation = "committed" end
+  function state:abort_commit()
+    if self.mutation == "committing" then self.mutation = "open" end
+  end
   local function finish(value)
     if state.finished then return end
     state.finished = true
@@ -9,11 +21,14 @@ function M.scheduled(done, work)
   end
   vim.schedule(function()
     if state.finished then return end
-    if state.cancelled then return finish({ ok = false, error = { code = "cancelled", message = "operation was cancelled", context = {} } }) end
-    local value = work(state, finish)
-    if value ~= nil then state.committed = value.ok == true; finish(value) end
+    if state:cancelled_before_commit() then return finish(M.failure("cancelled", "operation was cancelled")) end
+    local ok, value = xpcall(function() return work(state, finish) end, debug.traceback)
+    if not ok then return finish(M.failure("failed", value)) end
+    if value ~= nil then finish(value) end
   end)
-  return { cancel = function() if not state.finished and not state.committed then state.cancelled = true end end }, state, finish
+  return { cancel = function()
+    if not state.finished and state.mutation ~= "committed" then state.cancelled = true end
+  end }, state, finish
 end
 
 function M.failure(code, message, context)

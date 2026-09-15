@@ -27,28 +27,29 @@ end
 function M.add(request, done)
   callback(done)
   local captured, error = context.capture(request)
-  return operations.scheduled(done, function()
+  local text = type(request) == "table" and request.text or nil
+  return operations.scheduled(done, function(state)
     if not captured then return operations.failure("invalid_request", error) end
-    return operations.add_captured(captured, request.text)
+    return operations.add_captured(captured, text, state)
   end)
 end
 
 local function existing(name, id, request, done)
   callback(done)
   local copied = type(request) == "table" and vim.deepcopy(request) or request
-  return operations.scheduled(done, function() return operations[name](id, copied) end)
+  return operations.scheduled(done, function(state) return operations[name](id, copied, state) end)
 end
 function M.edit(id, request, done) return existing("edit", id, request, done) end
 function M.delete(id, request, done) return existing("delete", id, request, done) end
 function M.list(request, done)
   callback(done)
   local copied = type(request) == "table" and vim.deepcopy(request) or request
-  return operations.scheduled(done, function() return operations.list(copied) end)
+  return operations.scheduled(done, function(state) return operations.list(copied, state) end)
 end
 function M.export(request, done)
   callback(done)
   local copied = type(request) == "table" and vim.deepcopy(request) or request
-  return operations.scheduled(done, function() return operations.export(copied) end)
+  return operations.scheduled(done, function(state) return operations.export(copied, state) end)
 end
 
 local function target_error(code, message)
@@ -104,11 +105,9 @@ local function cancelled()
 end
 
 local function send_with_transport(request, transport, done)
-  local pending
-  local current_stage
   local operation, state, finish
   operation, state, finish = operations.scheduled(done, function()
-    local exported = operations.export(request)
+    local exported = operations.export(request, state)
     if not exported.ok then return exported end
     local batch = vim.deepcopy(exported.value)
     batch.transport = request.transport
@@ -116,38 +115,62 @@ local function send_with_transport(request, transport, done)
     batch.strict_session_guard = request.strict_session_guard or false
 
     local function invoke(stage, values, success)
-      local called = false
-      local function callback(result)
-        if called then return end
-        called = true
-        pending = nil
+      local token = { name = stage, status = "starting", callback_seen = false }
+      state.active_stage = token
+
+      local function current()
+        return not state.finished and state.active_stage == token and token.status == "waiting"
+      end
+
+      local function consume()
+        if not current() or token.processing then return end
+        token.processing = true
         vim.schedule(function()
-          if current_stage == stage then current_stage = nil end
-          local value, failure = transport_result(stage, result)
+          if state.finished or state.active_stage ~= token or not token.processing then return end
+          token.processing = false
+          token.status = "consumed"
+          state.active_stage = nil
+          local value, failure = transport_result(stage, token.callback_result)
           if failure then
-            if stage == "deliver" then
-              return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept"))
-            end
+            if stage == "deliver" then return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept")) end
             return finish(failure)
           end
-          if state.cancelled and stage ~= "deliver" then return finish(cancelled()) end
-          success(value)
+          if state.cancelled then
+            if stage == "deliver" then return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept")) end
+            return finish(cancelled())
+          end
+          local ok, error = xpcall(function() success(value) end, debug.traceback)
+          if not ok then
+            if stage == "deliver" then return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept")) end
+            return finish(operations.failure("failed", error))
+          end
         end)
       end
-      current_stage = stage
+
+      local function callback(result)
+        if state.finished or state.active_stage ~= token or token.callback_seen or token.status == "terminal" then return end
+        token.callback_seen = true
+        local copied, value = pcall(vim.deepcopy, result)
+        token.callback_result = copied and value or nil
+        if token.status == "waiting" then consume() end
+      end
       local ok, handle = pcall(transport[stage], vim.deepcopy(values), callback)
       if not ok then
+        token.status, state.active_stage = "terminal", nil
         if stage == "deliver" then return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept")) end
         return finish(operations.failure("invalid_state", "transport " .. stage .. " raised an error"))
       end
       if type(handle) ~= "table" or type(handle.cancel) ~= "function" then
+        token.status, state.active_stage = "terminal", nil
         if stage == "deliver" then return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept")) end
         return finish(malformed(stage))
       end
-      pending = handle
+      token.handle, token.status = handle, "waiting"
+      if token.callback_seen then consume() end
     end
 
     local function deliver(target)
+      if state.finished then return end
       batch.target = vim.deepcopy(target)
       invoke("deliver", {
         batch = vim.deepcopy(batch),
@@ -158,7 +181,8 @@ local function send_with_transport(request, transport, done)
         if type(value) ~= "table" or value.outcome ~= "delivered_to_input" then
           return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept"))
         end
-        local acknowledged = operations.acknowledge(batch.review, batch.members)
+        if state.finished then return end
+        local acknowledged = operations.acknowledge(batch.review, batch.members, state)
         if not acknowledged.ok then
           return finish({ ok = true, value = {
             outcome = "delivered_to_input", batch_id = batch.id, warning = "acknowledgement could not be saved",
@@ -171,6 +195,7 @@ local function send_with_transport(request, transport, done)
     end
 
     local function validate(target)
+      if state.finished then return end
       invoke("validate_target", {
         review = vim.deepcopy(batch.review),
         batch = vim.deepcopy(batch),
@@ -204,14 +229,19 @@ local function send_with_transport(request, transport, done)
         for _, target in ipairs(targets) do if vim.deep_equal(target, selected) then found = true; break end end
         if not found then return finish(operations.failure("target_mismatch", "transport target was not discovered")) end
       end
-      validate(selected)
+      if not state.finished then validate(selected) end
     end)
   end)
   local cancel = operation.cancel
   operation.cancel = function()
     cancel()
-    if pending then pending.cancel() end
-    if current_stage ~= "deliver" then finish(cancelled()) end
+    local token = state.active_stage
+    if token then
+      state.active_stage, token.status = nil, "terminal"
+      pcall(token.handle.cancel)
+      if token.name == "deliver" then return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept")) end
+    end
+    finish(cancelled())
   end
   return operation
 end

@@ -83,7 +83,7 @@ assert(#marks > 0 and marks[1][4].sign_text and not marks[1][4].hl_group and not
   "gutter rendering has a sign without a range tint")
 
 local listed = call(function(done) return feedback.list({ review = review(root) }, done) end, "list before transport")
-assert(listed.ok and #listed.value == 3, "fixture drafts persist")
+assert(listed.ok and #listed.value == 4, "fixture drafts persist")
 
 -- F1: a retained list callback cannot revive an operation whose method returned
 -- an invalid handle. The recorder proves validation, delivery, and ack never run.
