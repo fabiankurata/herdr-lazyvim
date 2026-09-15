@@ -142,6 +142,44 @@ wait_for(function() return cancelled ~= nil end, "cancelled list completes")
 assert(cancelled_calls == 1 and not cancelled.ok and cancelled.error.code == "cancelled", "cancellation completes once")
 assert(vim.deep_equal(cancel_stages, { "list" }), "late cancelled callbacks have no side effects")
 
+-- Cancellation may run from an extension before that extension has returned a
+-- handle. A later valid return must not revive the terminal stage.
+local operations = require("herdr_feedback.operations")
+local scheduled, in_method_operation = operations.scheduled, nil
+operations.scheduled = function(done, work)
+  in_method_operation = scheduled(done, work)
+  return in_method_operation
+end
+local returning_stages = {}
+assert(feedback.register_transport("cancel-before-handle", {
+  list_targets = function(_, _)
+    returning_stages[#returning_stages + 1] = "list"
+    in_method_operation.cancel()
+    return { cancel = function() end }
+  end,
+  validate_target = function() returning_stages[#returning_stages + 1] = "validate"; return { cancel = function() end } end,
+  deliver = function() returning_stages[#returning_stages + 1] = "deliver"; return { cancel = function() end } end,
+}).ok)
+local returning = call(function(done) return feedback.send({ review = review(root), transport = "cancel-before-handle" }, done) end, "cancel before returned handle")
+operations.scheduled = scheduled
+assert(not returning.ok and returning.error.code == "cancelled" and vim.deep_equal(returning_stages, { "list" }),
+  "cancellation during extension return leaves the stage terminal")
+
+-- A confirmed registered delivery remains delivered when acknowledgement code
+-- throws after the delivery boundary.
+local original_acknowledge = operations.acknowledge
+operations.acknowledge = function() error("controlled acknowledgement throw") end
+local acknowledged_transport = {
+  list_targets = function(_, done) done({ ok = true, value = { targets = { { name = "target" } } } }); return { cancel = function() end } end,
+  validate_target = function(_, done) done({ ok = true, value = { name = "target" } }); return { cancel = function() end } end,
+  deliver = function(_, done) done({ ok = true, value = { outcome = "delivered_to_input" } }); return { cancel = function() end } end,
+}
+assert(feedback.register_transport("acknowledgement-throw", acknowledged_transport).ok)
+local acknowledged = call(function(done) return feedback.send({ review = review(root), transport = "acknowledgement-throw" }, done) end, "acknowledgement throw")
+operations.acknowledge = original_acknowledge
+assert(acknowledged.ok and acknowledged.value.outcome == "delivered_to_input" and acknowledged.value.warning,
+  "acknowledgement throw retains confirmed delivery")
+
 -- F4: a package exception produces one structured completion rather than
 -- escaping the scheduler and abandoning the caller.
 local completion = require("herdr_feedback.completion")
@@ -214,7 +252,7 @@ vim.system = function(argv, options, done)
   command_calls[#command_calls + 1] = { argv = vim.deepcopy(argv), options = vim.deepcopy(options) }
   if argv[2] == "agent" and argv[3] == "list" then pending.preflight = done
   elseif argv[2] == "pane" then pending.delivery = done
-  elseif argv[2] == "agent" and argv[3] == "focus" then error("controlled focus startup failure")
+  elseif argv[2] == "agent" and argv[3] == "focus" then pending.focus = done or true
   else error("unexpected child") end
   return {}
 end
@@ -238,8 +276,10 @@ assert(command_calls[2].argv[1] == "herdr-A" and command_calls[2].options.env.HE
 assert(command_calls[2].options.env.HERDR_CLIENT_SOCKET_PATH == nil, "delivery removes competing routing selector")
 vim.env.HERDR_SOCKET_PATH = "socket-D"; vim.env.HERDR_BIN_PATH = "herdr-D"; vim.env.HERDR_SESSION = "third"
 pending.delivery({ code = 0, stdout = "", stderr = "" })
+wait_for(function() return pending.focus ~= nil end, "focus starts after delivery")
+if type(pending.focus) == "function" then pending.focus({ code = 1, stdout = "", stderr = "controlled focus failure" }) end
 wait_for(function() return sent ~= nil end, "focus failure still completes delivered operation")
-assert(sent_callbacks == 1 and sent.ok and sent.value.outcome == "delivered_to_input", "focus failure retains confirmed delivery")
+assert(sent_callbacks == 1 and sent.ok and sent.value.outcome == "delivered_to_input" and sent.value.warning, "focus failure retains confirmed delivery")
 assert(command_calls[3].argv[1] == "herdr-A" and command_calls[3].options.env.HERDR_SOCKET_PATH == "socket-A", "focus uses captured route")
 assert(command_calls[3].options.env.HERDR_SESSION == nil and command_calls[3].options.env.HERDR_SERVER_SESSION == nil, "focus removes competing selectors")
 vim.system = old_system
