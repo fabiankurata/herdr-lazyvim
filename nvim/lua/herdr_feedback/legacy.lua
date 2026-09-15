@@ -787,6 +787,7 @@ local function matches_target(agent, target)
     and listed_agent_session_id(agent) == target.agent_session_id
 end
 
+-- Any of these ambient selectors can override the captured target socket.
 local routing_selectors = {
   "HERDR_SOCKET_PATH", "HERDR_SESSION", "HERDR_SERVER_SESSION", "HERDR_CLIENT_SOCKET_PATH", "HERDR_CONFIG_PATH",
 }

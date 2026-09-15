@@ -227,16 +227,18 @@ local recovered, recovered_error = store.update(review(root), function(records) 
 assert(recovered and not recovered_error, "writer after cleanup diagnostic acquires released lock")
 
 -- A missing bundled executable is a definite startup failure, not a lost done.
+local original_socket, original_bin = vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH
 vim.env.HERDR_SOCKET_PATH = "missing-socket"
+vim.env.HERDR_BIN_PATH = state_root .. "/does-not-exist-herdr"
 local missing_target = {
   connection = { authority = review(root).worktree.authority, socket = "missing-socket" },
   workspace_id = "workspace", tab_id = "tab", pane_id = "pane", agent_session_id = "agent", worktree = review(root).worktree,
 }
-local original_system = vim.system
-vim.system = function() error("controlled executable startup failure") end
+local missing_before = bytes(root)
 local missing = call(function(done) return feedback.send({ review = review(root), target = missing_target }, done) end, "missing executable")
-assert(not missing.ok and missing.error.code == "failed", "unstartable bundled executable is structured")
-vim.system = original_system
+assert(not missing.ok and missing.error.code == "failed" and bytes(root) == missing_before,
+  "unstartable bundled executable is structured and retains drafts")
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = original_socket, original_bin
 
 -- A normalization commit during initial reading is not the end of a send
 -- operation: cancellation while bundled discovery waits must still win before
