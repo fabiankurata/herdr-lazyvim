@@ -19,14 +19,30 @@ from runtime_lease import (LEASE_FIELDS, LEASE_PID, LEASE_START, LEASE_TOKEN, _p
 
 
 REPO = HERE.parents[1]
-RUN_CHECK = REPO.parent / "program/artifacts/program/run_check.py"
+
+RUN_RECORDED = """
+from pathlib import Path
+import sys
+from runtime_lease import RecordedRun
+run = RecordedRun.start(Path(sys.argv[1]), sys.argv[3:], repo=Path(sys.argv[2]))
+raise SystemExit(run.finish())
+"""
+STOP_RECORDED = """
+import sys
+from runtime_lease import stop_recorded_run
+stop_recorded_run(sys.argv[1])
+"""
 
 
 class RuntimeLeaseTests(unittest.TestCase):
-    def child(self, source, *, cwd=REPO, environment=None):
+    def python_environment(self, environment=None):
         env = dict(os.environ if environment is None else environment)
         env["PYTHONPATH"] = str(HERE) + os.pathsep + env.get("PYTHONPATH", "")
-        return subprocess.run([sys.executable, "-c", source], cwd=cwd, env=env,
+        return env
+
+    def child(self, source, *, cwd=REPO, environment=None):
+        return subprocess.run([sys.executable, "-c", source], cwd=cwd,
+                              env=self.python_environment(environment),
                               text=True, capture_output=True, timeout=10)
 
     @contextlib.contextmanager
@@ -201,7 +217,7 @@ lease.close()
                 sibling.terminate()
                 sibling.wait(timeout=3)
 
-    def test_run_check_stop_reaches_supervisor_while_finish_waits(self):
+    def test_stop_reaches_supervisor_while_finish_waits(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             child_pid = root / "child.pid"
@@ -213,20 +229,28 @@ lease.close()
                 "pathlib.Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(30)"
             )
             sibling = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
-            runner = subprocess.Popen([sys.executable, str(RUN_CHECK), "--repo", str(REPO), "--output", str(output),
-                                       "--expected", subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
-                                       "--", sys.executable, "-c", leader, str(child_pid)], cwd=REPO,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            receipt = output / "run.json"
+            output.mkdir()
+            runner = subprocess.Popen([
+                sys.executable, "-c", RUN_RECORDED, str(receipt), str(REPO),
+                sys.executable, "-c", leader, str(child_pid),
+            ], cwd=REPO, env=self.python_environment(), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True)
             try:
                 deadline = time.monotonic() + 5
-                while not (output / "run.json").exists() and time.monotonic() < deadline:
+                while not receipt.exists() and time.monotonic() < deadline and runner.poll() is None:
                     time.sleep(.02)
-                self.assertTrue((output / "run.json").exists())
+                if not receipt.exists() and runner.poll() is not None:
+                    stdout, stderr = runner.communicate(timeout=1)
+                    self.fail("recorded runner exited before its receipt:\n" + stdout + stderr)
+                self.assertTrue(receipt.exists(), "recorded runner did not publish its receipt")
                 while not child_pid.exists() and time.monotonic() < deadline:
                     time.sleep(.02)
                 self.assertTrue(child_pid.exists())
-                result = subprocess.run([sys.executable, str(RUN_CHECK), "--repo", str(REPO), "--output", str(root / "stop"),
-                                         "--stop-run", str(output / "run.json")], cwd=REPO, text=True, capture_output=True, timeout=5)
+                result = subprocess.run(
+                    [sys.executable, "-c", STOP_RECORDED, str(receipt)], cwd=REPO,
+                    env=self.python_environment(), text=True, capture_output=True, timeout=5,
+                )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 runner.wait(timeout=5)
                 self.assertIsNone(_process_identity(int(child_pid.read_text())))
@@ -261,9 +285,10 @@ lease.close()
                 receipt.write_text(json.dumps({"version": 2, "control": {"socket": "/tmp/no-such-supervisor.sock",
                                                 "run_id": "forged", "token": "forged"},
                                           "child": _process_identity(unrelated.pid), "group": unrelated.pid}))
-                result = subprocess.run([sys.executable, str(RUN_CHECK), "--repo", str(REPO),
-                                         "--output", str(Path(temporary) / "unused"), "--stop-run", str(receipt)],
-                                        cwd=REPO, text=True, capture_output=True, timeout=10)
+                result = subprocess.run(
+                    [sys.executable, "-c", STOP_RECORDED, str(receipt)], cwd=REPO,
+                    env=self.python_environment(), text=True, capture_output=True, timeout=10,
+                )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIsNone(unrelated.poll(), result.stdout + result.stderr)
             finally:
