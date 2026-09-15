@@ -274,11 +274,10 @@ normalized_pending.agents({ code = 0, stdout = vim.json.encode({ result = { agen
   { workspace_id = "normalization-workspace", pane_id = "agent-one", agent = "one" },
   { workspace_id = "normalization-workspace", pane_id = "agent-two", agent = "two" },
 } } }), stderr = "" })
-wait_for(function() return normalized_pending.tabs ~= nil end, "cancelled discovery reaches synthetic tab list")
-normalized_pending.tabs({ code = 0, stdout = vim.json.encode({ result = { tabs = {} } }), stderr = "" })
 wait_for(function() return normalized_result ~= nil end, "normalizing cancelled send completes")
-assert(normalized_callbacks == 1 and not normalized_result.ok and normalized_result.error.code == "cancelled" and normalized_input == 0,
-  "normalization does not disable later pre-delivery cancellation")
+assert(normalized_callbacks == 1 and not normalized_result.ok and normalized_result.error.code == "cancelled"
+    and normalized_pending.tabs == nil and normalized_input == 0,
+  "cancelled discovery starts no tab lookup or delivery")
 local normalized_state = vim.json.decode(table.concat(vim.fn.readfile(state_path(normalization_root)), "\n"))
 assert(#normalized_state.comments == 1 and normalized_state.comments[1].id and normalized_state.comments[1].revision == 1
     and normalized_state.comments[1].text == "old normalized draft", "cancelled normalization send retains its normalized draft")
@@ -351,6 +350,45 @@ assert(sent_callbacks == 1 and sent.ok and sent.value.outcome == "delivered_to_i
 assert(command_calls[3].argv[1] == "herdr-A" and command_calls[3].options.env.HERDR_SOCKET_PATH == "socket-A", "focus uses captured route")
 assert(command_calls[3].options.env.HERDR_SESSION == nil and command_calls[3].options.env.HERDR_SERVER_SESSION == nil, "focus removes competing selectors")
 vim.system = old_system
+
+-- A persistence exception after bundled input confirmation cannot abandon the
+-- public callback or reclassify input delivery. The draft remains for retry.
+local ack_root = state_root .. "/bundled-ack-throw"
+vim.fn.mkdir(ack_root .. "/.git", "p")
+vim.fn.writefile({ "source" }, ack_root .. "/example.lua")
+ack_root = assert(vim.uv.fs_realpath(ack_root))
+vim.fn.writefile({ vim.json.encode({ version = 1, root = ack_root, comments = {
+  { id = "00000000-0000-4000-8000-0000000000b1", revision = 1, file = "example.lua", start = 1, finish = 1, lines = "source", text = "retain after acknowledgement throw" },
+} }) }, state_path(ack_root))
+local ack_socket, ack_bin = vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = "ack-socket", "ack-herdr"
+local ack_target = {
+  connection = { authority = review(ack_root).worktree.authority, socket = "ack-socket" },
+  workspace_id = "ack-workspace", tab_id = "ack-tab", pane_id = "ack-pane", agent_session_id = "ack-agent", worktree = review(ack_root).worktree,
+}
+local ack_pending, ack_calls = {}, 0
+local ack_system, acknowledge = vim.system, operations.acknowledge
+vim.system = function(argv, _, done)
+  if argv[2] == "agent" and argv[3] == "list" then ack_pending.preflight = done
+  elseif argv[2] == "pane" then ack_pending.delivery = done
+  elseif argv[2] == "agent" and argv[3] == "focus" then vim.schedule(function() done({ code = 0, stdout = "", stderr = "" }) end) end
+  return {}
+end
+operations.acknowledge = function() error("controlled bundled acknowledgement throw") end
+local ack_result
+feedback.send({ review = review(ack_root), target = ack_target }, function(value) ack_calls = ack_calls + 1; ack_result = value end)
+wait_for(function() return ack_pending.preflight ~= nil end, "bundled acknowledgement preflight starts")
+ack_pending.preflight({ code = 0, stdout = vim.json.encode({ result = { agents = {
+  { workspace_id = "ack-workspace", tab_id = "ack-tab", pane_id = "ack-pane", agent_session = { kind = "id", value = "ack-agent" } },
+} } }), stderr = "" })
+wait_for(function() return ack_pending.delivery ~= nil end, "bundled acknowledgement delivery starts")
+ack_pending.delivery({ code = 0, stdout = "", stderr = "" })
+wait_for(function() return ack_result ~= nil end, "bundled acknowledgement throw completes")
+assert(ack_calls == 1 and ack_result.ok and ack_result.value.outcome == "delivered_to_input" and ack_result.value.warning
+    and vim.json.decode(table.concat(vim.fn.readfile(state_path(ack_root)), "\n")).comments[1].text == "retain after acknowledgement throw",
+  "bundled acknowledgement throw retains delivered outcome and draft")
+operations.acknowledge, vim.system = acknowledge, ack_system
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = ack_socket, ack_bin
 
 print("PR02 correction regressions: lifecycle, routing, snapshot, and gutter: ok")
 vim.cmd("qa!")
