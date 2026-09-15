@@ -11,13 +11,19 @@ import sys
 import time
 import importlib.util
 
+LIVE = Path(__file__).resolve().parents[1] / "live"
+if str(LIVE) not in sys.path:
+    sys.path.insert(0, str(LIVE))
+from runtime_lease import LEASE_FIELDS, require_runtime_lease
+require_runtime_lease()
+
 _NATIVE_RUN_SPEC = importlib.util.spec_from_file_location(
     "pr00_native_run", Path(__file__).with_name("run.py"))
 _native_run = importlib.util.module_from_spec(_NATIVE_RUN_SPEC)
 _NATIVE_RUN_SPEC.loader.exec_module(_native_run)
 keylog_records = _native_run.keylog_records
 result_exit_code = _native_run.result_exit_code
-from workspace_fixture import (OwnershipError, UNIX_SOCKET_PATH_MAX, WorkspaceFixture,
+from workspace_fixture import (ExistingAlacritty, OwnershipError, UNIX_SOCKET_PATH_MAX, WorkspaceFixture,
                                calibrated_capture_plan, fixture_layout, load_target, nvim_socket_path,
                                parse_capture_calibration, process_identity, select_window)
 from checkpoint import capture_checkpoint, checkpoint_context, stop_viewer, viewer_argv
@@ -92,6 +98,12 @@ class FixtureRunner:
 
 
 class WorkspaceFixtureTests(unittest.TestCase):
+    def test_existing_alacritty_sends_escape_with_the_native_keycode(self):
+        client = ExistingAlacritty(TARGET, [])
+        with mock.patch.object(client, "verify"), mock.patch.object(client, "_ax", return_value={}) as ax:
+            client.key("escape")
+        ax.assert_called_once_with("key code 53")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.runner = FixtureRunner()
@@ -154,6 +166,19 @@ class WorkspaceFixtureTests(unittest.TestCase):
         fixture.close()
         self.assertFalse(fixture.fixture_root.exists())
         self.assertEqual(json.loads((fixture.artifact / "fixture-teardown.json").read_text())["status"], "PASS")
+
+    def test_create_makes_only_fixture_runtime_directories_and_forwards_lease_bytes(self):
+        fixture = self.fixture()
+        lease_values = {key: str(Path(self.temp.name) / "must-not-exist" / key) for key in LEASE_FIELDS}
+        with mock.patch.dict(os.environ, lease_values, clear=False):
+            fixture.create()
+        created = self.runner.commands[-2]
+        values = {created[index + 1].split("=", 1)[0]: created[index + 1].split("=", 1)[1]
+                  for index, value in enumerate(created[:-1]) if value == "--env"}
+        self.assertEqual({key: values[key] for key in LEASE_FIELDS}, lease_values)
+        for name in ("home", "config", "cache", "state", "data", "runtime"):
+            self.assertTrue((fixture.fixture_root / name).is_dir())
+        self.assertFalse((Path(self.temp.name) / "must-not-exist").exists())
 
     def test_cleanup_refuses_an_unowned_pane_and_keeps_runtime_for_recovery(self):
         fixture = self.fixture()
@@ -339,12 +364,12 @@ class WorkspaceFixtureTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "UNVERIFIED: proc_pidpath is a macOS-only kernel probe")
     def test_kernel_image_path_observes_a_real_harmless_process(self):
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+        executable = Path("/bin/sleep").resolve()
+        child = subprocess.Popen([str(executable), "5"])
         try:
             identity = process_identity(child.pid)
             observed = checkpoint.execution_observation(identity)
-            self.assertTrue(Path(observed["kernel_image_path"]).is_absolute())
-            self.assertEqual(observed["kernel_image_path"], str(Path(sys.executable).resolve()))
+            self.assertEqual(observed["kernel_image_path"], str(executable))
         finally:
             child.terminate(); child.wait(timeout=2)
 

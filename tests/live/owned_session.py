@@ -20,6 +20,8 @@ import time
 import threading
 import uuid
 
+from runtime_lease import require_runtime_lease, preserve_lease_environment
+
 
 class OwnershipError(RuntimeError):
     pass
@@ -53,6 +55,7 @@ def isolated_environment(root, inherited=None):
         env[key] = str(path)
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
                PYTHONDONTWRITEBYTECODE="1")
+    env.update(preserve_lease_environment(inherited))
     return env
 
 
@@ -246,6 +249,8 @@ class OwnedSession:
         self._events = []
         self._previous_sigterm = None
         self._signal_installed = False
+        self._lease = None
+        self._lease_environment = None
 
     def _write_update_control(self):
         """Write the supported update controls inside this owned runtime only."""
@@ -418,6 +423,8 @@ class OwnedSession:
         if threading.current_thread() is not threading.main_thread():
             raise OwnershipError("owned sessions require the main thread for cancellation handling")
         try:
+            self._lease_environment = {key: os.environ.get(key) for key in preserve_lease_environment(os.environ)}
+            self._lease = require_runtime_lease()
             def interrupted(signum, frame):
                 raise KeyboardInterrupt("owned runtime received signal " + str(signum))
             self._previous_sigterm = signal.signal(signal.SIGTERM, interrupted)
@@ -505,6 +512,16 @@ class OwnedSession:
             with defer_cancellation():
                 self._close()
         finally:
+            if self._lease is not None:
+                self._lease.close()
+                self._lease = None
+            if self._lease_environment is not None:
+                for key, value in self._lease_environment.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+                self._lease_environment = None
             if self._signal_installed:
                 signal.signal(signal.SIGTERM, self._previous_sigterm)
                 self._signal_installed = False

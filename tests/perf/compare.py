@@ -52,6 +52,49 @@ def shell_open(source, runtime, artifact):
             "metrics": {"shell_dispatch_open_ms": elapsed, "external_call_count": len(state["calls"])}}
 
 
+def comment_operations(source, runtime, artifact):
+    """Measure public list/send/ack against an archived plugin source and fake delivery."""
+    measurements = {}
+    for count in (10, 1000):
+        result_path = runtime.root / f"comment-operations-{count}.json"
+        fixture = runtime.root / f"comment-operations-fixture-{count}"
+        env = runtime.env | {
+            "SOURCE_REPO": str(source), "FIXTURE_ROOT": str(fixture),
+            "HERDR_TEST_STATE_ROOT": str(runtime.root / f"state-{count}"),
+            "OPERATION_COUNT": str(count), "OPERATION_RESULT": str(result_path),
+        }
+        completed = runtime.execute([
+            "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l",
+            str(HARNESS / "tests/nvim/comment_operations.lua"),
+        ], env=env, check=False, timeout=20)
+        (artifact / f"stdout-{count}.txt").write_text(completed.stdout)
+        (artifact / f"stderr-{count}.txt").write_text(completed.stderr)
+        if completed.returncode != 0 or not result_path.exists():
+            return {"status": "FAIL", "exit_code": completed.returncode, "metrics": {}}
+        observed = json.loads(result_path.read_text())
+        measurements.update(comment_operation_metrics(observed, count))
+    return {"status": "PASS", "metrics": measurements}
+
+
+def comment_operation_metrics(observed, count):
+    """Validate and namespace the Lua fixture's public-operation timings."""
+    required = ("add_bookkeeping_ms", "add_total_ms", "list_bookkeeping_ms",
+                "list_total_ms", "send_ack_bookkeeping_ms", "send_ack_total_ms")
+    if observed.get("status") != "PASS" or observed.get("seeded_count") != count:
+        raise ValueError("comment operation fixture did not complete its requested public flow")
+    if observed.get("listed_count") != count + 1:
+        raise ValueError("comment operation fixture did not list the public add")
+    if observed.get("fake_delivery_delay_ms") != 0:
+        raise ValueError("comment operation fixture must exclude fake delivery delay")
+    metrics = {}
+    for key in required:
+        value = observed.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("invalid comment operation metric: " + key)
+        metrics[f"{key[:-3]}_{count}_ms"] = value
+    return metrics
+
+
 def summary(observations, label):
     selected = [item for item in observations if item["side"] == label]
     passed = [item for item in selected if item["status"] == "PASS"]
@@ -152,11 +195,26 @@ def main():
             )
             print(artifact / "result.json")
             return {"PASS": 0, "FAIL": 1, "UNVERIFIED": 2}[result["status"]]
-        if args.scenario != "shell-open":
+        if args.scenario not in {"shell-open", "comment-operations"}:
             result["reason"] = "No integrated actual lifecycle workload. Use run_pairs with the prototype lifecycle callable. No unrelated workload was measured."
             write_json(artifact / "result.json", result)
             print(artifact / "result.json")
             return 2
+        if args.scenario == "comment-operations":
+            result["workload"] = "public list/send/ack against a fixture-only delivery command; fake delivery delay excluded"
+            result["order"] = "interleaved AB, BA pairs"
+            write_json(artifact / "result.json", result)
+            observations = run_pairs(HARNESS, args.baseline, args.candidate, args.samples, artifact,
+                                     measure=comment_operations)
+            result["observations"] = observations
+            result["measured"] = {side: summary(observations, side) for side in ("baseline", "candidate")}
+            failures = [item for item in observations if item["status"] != "PASS"]
+            result["status"] = "FAIL" if failures else "PASS"
+            result["comment_operations_status"] = result["status"]
+            write_json(artifact / "baseline.json", {"source": baseline, **result["measured"]["baseline"]})
+            write_json(artifact / "result.json", result)
+            print(artifact / "result.json")
+            return 1 if failures else 0
         result["workload"] = "shell dispatch open against evolving fake pane API; does not create a live editor"
         result["order"] = "interleaved AB, BA pairs"
         write_json(artifact / "result.json", result)
@@ -183,4 +241,6 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from runtime_lease import runtime_lease_owner
+    with runtime_lease_owner(repo=Path(__file__).resolve().parents[2]):
+        sys.exit(main())

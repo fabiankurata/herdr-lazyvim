@@ -10,6 +10,11 @@ import uuid
 
 
 HERE = Path(__file__).resolve().parent
+LIVE = HERE.parent / "live"
+if str(LIVE) not in sys.path:
+    sys.path.insert(0, str(LIVE))
+from runtime_lease import require_runtime_lease
+require_runtime_lease()
 
 PROBE = r'''
 import AppKit

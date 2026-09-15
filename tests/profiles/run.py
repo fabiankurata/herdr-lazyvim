@@ -306,4 +306,6 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from runtime_lease import runtime_lease_owner
+    with runtime_lease_owner(repo=HARNESS):
+        sys.exit(main())

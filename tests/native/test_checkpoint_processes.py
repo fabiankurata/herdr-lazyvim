@@ -19,6 +19,11 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+LIVE = HERE.parent / "live"
+if str(LIVE) not in sys.path:
+    sys.path.insert(0, str(LIVE))
+from runtime_lease import require_runtime_lease
+require_runtime_lease()
 
 import checkpoint
 from workspace_fixture import OwnershipError

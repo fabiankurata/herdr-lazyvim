@@ -1,4 +1,4 @@
-.PHONY: audit test test-isolated live-isolation perf-compare
+.PHONY: audit test test-isolated test-operations live-isolation perf-compare
 
 audit:
 	bash scripts/check-public.sh
@@ -13,6 +13,7 @@ test-isolated:
 	bash scripts/setup-macos.sh plan >/dev/null
 	nvim --headless -u NONE -i NONE -c "luafile tests/nvim_smoke.lua"
 	HERDR_TEST_FIXTURE_ROOT="$$HERDR_TEST_STATE_ROOT/async-fixture" HERDR_TEST_REPO="$(CURDIR)" nvim --headless -u NONE -i NONE -l tests/nvim/async_root_baseline.lua
+	$(MAKE) test-operations
 	python3 tests/public_scan.py
 	python3 tests/contracts/check.py
 	bash tests/live/test-isolation
@@ -20,6 +21,10 @@ test-isolated:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/profiles -p 'test_*.py' -v
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/native -p 'test_*.py' -v
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/prototypes -p 'test_*.py' -v
+
+test-operations:
+	@test -n "$$HERDR_TEST_STATE_ROOT" || { echo 'use make test-operations through the isolated test runner' >&2; exit 1; }
+	HERDR_TEST_FIXTURE_ROOT="$$HERDR_TEST_STATE_ROOT/operations-fixture" HERDR_TEST_REPO="$(CURDIR)" nvim --headless -u NONE -i NONE -l tests/nvim/operations.lua
 
 live-isolation:
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/live/isolated_test.py bash $(CURDIR)/tests/live/test-isolation

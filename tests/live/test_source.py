@@ -6,6 +6,11 @@ import sys
 import tempfile
 import unittest
 
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from runtime_lease import require_runtime_lease
+require_runtime_lease()
 from source import checked_source, exact_revision, new_artifact, source_archive
 from owned_session import isolated_environment
 

@@ -93,35 +93,73 @@ local function save_last_agents()
   pcall(vim.fn.writefile, { vim.json.encode(config.last_agents) }, last_agents_file())
 end
 
-local function save()
-  if not active_root then
-    return
+local function random_uuid()
+  local bytes = assert(vim.uv.random(16), "could not generate annotation identity")
+  local parts = {}
+  for index = 1, #bytes do parts[index] = string.format("%02x", bytes:byte(index)) end
+  parts[7] = "4" .. parts[7]:sub(2)
+  parts[9] = string.format("%x", (tonumber(parts[9]:sub(1, 1), 16) % 4) + 8) .. parts[9]:sub(2)
+  local hex = table.concat(parts)
+  return table.concat({ hex:sub(1, 8), hex:sub(9, 12), hex:sub(13, 16), hex:sub(17, 20), hex:sub(21, 32) }, "-")
+end
+
+local function normalize_comments(records)
+  local normalized = false
+  for _, comment in ipairs(records) do
+    local valid_id = type(comment.id) == "string" and comment.id:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-4%x%x%x%-[89ab]%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$")
+    if not valid_id then
+      comment.id = random_uuid()
+      normalized = true
+    end
+    if type(comment.revision) ~= "number" or comment.revision % 1 ~= 0 or comment.revision < 1 then
+      comment.revision = 1
+      normalized = true
+    end
   end
-  if #comments == 0 then
-    vim.fn.delete(state_file(active_root))
-    return
+  return records, normalized
+end
+
+local function read_review(root)
+  local path = state_file(root)
+  if not vim.uv.fs_stat(path) then return {}, nil end
+  if vim.fn.filereadable(path) == 0 then return nil, "could not read review state" end
+  local read_ok, lines = pcall(vim.fn.readfile, path)
+  if not read_ok then return nil, "could not read review state" end
+  local ok, decoded = pcall(vim.json.decode, table.concat(lines, "\n"))
+  if not ok or type(decoded) ~= "table" or decoded.root ~= root or type(decoded.comments) ~= "table" then
+    return nil, "review state is malformed or belongs to another root"
   end
-  local encoded = vim.json.encode({ version = 1, root = active_root, comments = comments })
-  local ok = pcall(vim.fn.writefile, { encoded }, state_file(active_root))
-  if not ok then
-    notify("Could not save review comments", vim.log.levels.ERROR)
+  local records, normalized = normalize_comments(decoded.comments)
+  return records, nil, normalized
+end
+
+local function write_review(root, records)
+  if #records == 0 then
+    local ok, result = pcall(vim.fn.delete, state_file(root))
+    if ok and result == 0 then return true end
+    notify("Could not save review comments", vim.log.levels.ERROR); return false
   end
+  local ok, result = pcall(vim.fn.writefile, { vim.json.encode({ version = 1, root = root, comments = records }) }, state_file(root))
+  if not ok or result ~= 0 then notify("Could not save review comments", vim.log.levels.ERROR); return false end
+  return true
 end
 
 local function load(root)
   if active_root == root then
-    return
+    return true
+  end
+  local loaded, error, normalized = read_review(root)
+  if not loaded then
+    notify(error, vim.log.levels.ERROR)
+    return false
+  end
+  if normalized and not write_review(root, loaded) then
+    notify("Could not persist review identities", vim.log.levels.ERROR)
+    return false
   end
   active_root = root
-  comments = {}
-  local path = state_file(root)
-  if vim.fn.filereadable(path) == 0 then
-    return
-  end
-  local ok, decoded = pcall(vim.json.decode, table.concat(vim.fn.readfile(path), "\n"))
-  if ok and type(decoded) == "table" and decoded.root == root and type(decoded.comments) == "table" then
-    comments = decoded.comments
-  end
+  comments = loaded
+  return true
 end
 
 local function clear_decorations()
@@ -311,7 +349,9 @@ local function decorate(buf)
   if not location then
     return
   end
-  load(location.root)
+  if not load(location.root) then
+    return
+  end
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   local visible = {}
   local overlap_counts = {}
@@ -490,8 +530,9 @@ local function comment_editor(title, initial, anchor_line, callback)
       notify("Write a comment before saving", vim.log.levels.WARN)
       return
     end
-    close()
-    callback(text)
+    if callback(text) then
+      close()
+    end
   end
 
   for _, key in ipairs(config.comment_save_keys) do
@@ -524,6 +565,10 @@ local function selection(buf, visual)
   return location.root, location.file, first, last, table.concat(lines, "\n"), location.removed
 end
 
+local function new_comment_id(root, file, first, last, text)
+  return random_uuid()
+end
+
 function M.comment(visual)
   local buf = vim.api.nvim_get_current_buf()
   local name = vim.api.nvim_buf_get_name(buf)
@@ -536,13 +581,24 @@ function M.comment(visual)
     notify("This buffer is not a project file", vim.log.levels.WARN)
     return
   end
-  load(root)
+  if not load(root) then return end
   local location = first == last and string.format("%s:%d", file, first) or string.format("%s:%d-%d", file, first, last)
   if removed then
     location = location .. " (removed)"
   end
   comment_editor("Comment " .. location, nil, last, function(text)
-    table.insert(comments, {
+    local review_comments, error
+    if active_root == root then
+      review_comments = vim.deepcopy(comments)
+    else
+      review_comments, error = read_review(root)
+    end
+    if not review_comments then
+      notify(error, vim.log.levels.ERROR)
+      return false
+    end
+    table.insert(review_comments, {
+      id = new_comment_id(root, file, first, last, text), revision = 1,
       file = file,
       start = first,
       finish = last,
@@ -550,9 +606,13 @@ function M.comment(visual)
       text = text,
       removed = removed or nil,
     })
-    save()
-    refresh()
-    notify(string.format("Added comment %d of %d", #comments, #comments))
+    if not write_review(root, review_comments) then
+      notify("Comment was kept in the composer because it could not be saved", vim.log.levels.ERROR)
+      return false
+    end
+    if active_root == root then comments = review_comments; refresh() end
+    notify(string.format("Added comment %d of %d", #review_comments, #review_comments))
+    return true
   end)
 end
 
@@ -563,7 +623,7 @@ local function jump_to(comment)
 end
 
 function M.list()
-  load(root_for(0))
+  if not load(root_for(0)) then return end
   if #comments == 0 then
     notify("No review comments")
     return
@@ -588,7 +648,7 @@ function M.delete()
     notify("This buffer is not a project file", vim.log.levels.WARN)
     return
   end
-  load(location.root)
+  if not load(location.root) then return end
   local line = vim.api.nvim_win_get_cursor(0)[1]
   for index = #comments, 1, -1 do
     local comment = comments[index]
@@ -598,8 +658,13 @@ function M.delete()
       and line >= comment.start
       and line <= comment.finish
     then
-      table.remove(comments, index)
-      save()
+      local remaining = vim.deepcopy(comments)
+      table.remove(remaining, index)
+      if not write_review(active_root, remaining) then
+        notify("Review comment was kept because it could not be saved", vim.log.levels.ERROR)
+        return
+      end
+      comments = remaining
       refresh()
       notify("Deleted review comment")
       return
@@ -608,14 +673,41 @@ function M.delete()
   notify("No review comment on this line", vim.log.levels.WARN)
 end
 
-local function edit_comment(comment)
+local function edit_comment(comment, root)
   local range = comment.start == comment.finish and tostring(comment.start)
     or string.format("%d-%d", comment.start, comment.finish)
+  local captured = { root = root, id = comment.id, revision = comment.revision }
   comment_editor(string.format("Edit %s:%s", comment.file, range), comment.text, comment.finish, function(text)
-    comment.text = text
-    save()
-    refresh()
+    local review_comments, error
+    if active_root == captured.root then
+      review_comments = vim.deepcopy(comments)
+    else
+      review_comments, error = read_review(captured.root)
+    end
+    if not review_comments then
+      notify(error, vim.log.levels.ERROR)
+      return false
+    end
+    local updated = false
+    for _, current in ipairs(review_comments) do
+      if current.id == captured.id and current.revision == captured.revision then
+        current.text = text
+        current.revision = current.revision + 1
+        updated = true
+        break
+      end
+    end
+    if not updated then
+      notify("Comment changed while editing; draft was kept", vim.log.levels.WARN)
+      return false
+    end
+    if not write_review(captured.root, review_comments) then
+      notify("Edited comment was kept in the composer because it could not be saved", vim.log.levels.ERROR)
+      return false
+    end
+    if active_root == captured.root then comments = review_comments; refresh() end
     notify("Updated review comment")
+    return true
   end)
 end
 
@@ -625,7 +717,7 @@ function M.edit()
     notify("This buffer is not a project file", vim.log.levels.WARN)
     return
   end
-  load(location.root)
+  if not load(location.root) then return end
   local line = vim.api.nvim_win_get_cursor(0)[1]
   local matches = {}
   for _, comment in ipairs(comments) do
@@ -641,7 +733,7 @@ function M.edit()
   if #matches == 0 then
     notify("No review comment on this line", vim.log.levels.WARN)
   elseif #matches == 1 then
-    edit_comment(matches[1])
+    edit_comment(matches[1], location.root)
   else
     vim.ui.select(matches, {
       prompt = "Edit review comment",
@@ -650,7 +742,7 @@ function M.edit()
       end,
     }, function(comment)
       if comment then
-        edit_comment(comment)
+        edit_comment(comment, location.root)
       end
     end)
   end
@@ -769,28 +861,70 @@ local function pasted(text)
   return "\27[200~" .. text .. paste_end
 end
 
-function M.send()
-  load(root_for(0))
+function M.send(options)
+  if not load(root_for(0)) then return end
   if #comments == 0 then
     notify("No review comments to send", vim.log.levels.WARN)
     return
   end
-  local payload = format_all()
-  local count = #comments
+  if not write_review(active_root, comments) then
+    return
+  end
+  options = options or {}
+  local requested = {}
+  if options.annotation_ids then
+    for _, id in ipairs(options.annotation_ids) do requested[id] = true end
+  end
+  local origin = {
+    root = active_root,
+    window = vim.api.nvim_get_current_win(),
+    buffer = vim.api.nvim_get_current_buf(),
+    cursor = vim.api.nvim_win_get_cursor(0),
+    mode = vim.api.nvim_get_mode().mode,
+    members = {},
+  }
+  local batch = {}
+  for _, comment in ipairs(comments) do
+    if not options.annotation_ids or requested[comment.id] then table.insert(batch, vim.deepcopy(comment)) end
+  end
+  if #batch == 0 then
+    notify("No selected review comments to send", vim.log.levels.WARN)
+    return
+  end
+  for _, comment in ipairs(batch) do table.insert(origin.members, { id = comment.id, revision = comment.revision }) end
+  local payload = format_comments(batch)
+  local count = #batch
   choose_agent(function(agent)
     local herdr = vim.env.HERDR_BIN_PATH or "herdr"
     vim.system({ herdr, "pane", "send-text", agent.pane_id, pasted(payload) }, { text = true }, function(result)
       vim.schedule(function()
         if result.code ~= 0 then
-          notify("Agent not found; comments were kept", vim.log.levels.ERROR)
+          notify("Delivery outcome is uncertain; comments were kept and will not be resent automatically", vim.log.levels.WARN)
+          return
+        end
+        local selected = {}
+        for _, member in ipairs(origin.members) do selected[member.id .. "\0" .. member.revision] = true end
+        local remaining = {}
+        local persisted, error = read_review(origin.root)
+        if not persisted then
+          notify("Delivery outcome is uncertain; comments were kept because review state could not be read: " .. error, vim.log.levels.WARN)
+          return
+        end
+        for _, comment in ipairs(persisted) do
+          if not selected[comment.id .. "\0" .. comment.revision] then table.insert(remaining, comment) end
+        end
+        if not write_review(origin.root, remaining) then
+          notify("Delivery outcome is uncertain; comments were kept because acknowledgement could not be saved", vim.log.levels.WARN)
           return
         end
         config.last_agents[agent.workspace_id] = agent.pane_id
         save_last_agents()
-        comments = {}
-        save()
-        clear_decorations()
-        notify(string.format("Added %d comment%s to %s", count, count == 1 and "" or "s", agent_name(agent)))
+        if active_root == origin.root then
+          comments = remaining
+          clear_decorations()
+          refresh()
+        end
+        notify(string.format("Pasted %d comment%s to %s; agent execution is not confirmed", count, count == 1 and "" or "s", agent_name(agent)))
         vim.system({ herdr, "agent", "focus", agent.pane_id }, { text = true })
       end)
     end)

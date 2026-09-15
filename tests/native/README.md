@@ -22,6 +22,37 @@ python3 tests/native/run.py --revision "$(git rev-parse HEAD)" \
   --artifact-dir artifacts/PR00/native-workspace/candidate-1
 ```
 
+## PR01 comment-operation review
+
+`comment_operations.py` uses the existing approved Alacritty through `WorkspaceFixture`. It never starts or restarts Alacritty, never reads the general clipboard, and replaces `vim.system` only inside the isolated Neovim with a controlled sender that records accepted bytes. The ten lanes call the public comment, edit, list, and send operations. Composer lanes use native typed input and the actual Cmd-Enter or Ctrl-S mapping.
+
+The closed-origin lane keeps the original A composer alive after closing only its normal A source window. It records a separate normal B window before the close and requires its buffer, view, cursor, content, and focus to survive the save unchanged.
+
+Run the native review only after the coordinator grants the runtime slot:
+
+```sh
+python3 tests/native/comment_operations.py --revision "$(git rev-parse HEAD)" \
+  --target-file ../program/artifacts/program/native-target-shell-viewport.json \
+  --artifact-dir "artifacts/PR01/$(git rev-parse HEAD)"
+```
+
+The bounded headless smoke drives all ten public fixture phases and their observed
+callbacks through an isolated Neovim process. It does not type native keys, take
+captures, or establish native PASS. Run it only after the runtime lease gate:
+
+```sh
+python3 tests/native/comment_operations.py --headless-smoke --revision "$(git rev-parse HEAD)" \
+  --artifact-dir "artifacts/PR01/$(git rev-parse HEAD)/headless-smoke"
+```
+
+Headless Neovim starts with a fresh HOME, XDG config/data/state/cache roots, and
+the `herdr-pr01-review` app name before it resolves `stdpath()`. The fixture
+seeds the exact resolved state directory that the product reads. Its artifact
+contains a bounded command log, a report, and persisted diagnostics for every
+completed lane, including the failing lane when Neovim exits unsuccessfully.
+
+The native runner writes its preflight receipt before it validates the private target or calibration, so unavailable prerequisites remain durably `UNVERIFIED` before any GUI action. It records a result for every lane in `review/`, creates the ten named calibrated PNGs, and records a separate 30 to 60 second review interaction through fresh calibrated captures to build `review/review.mp4`. Each frame has its own capture receipt and the video uses measured monotonic intervals, rather than a frame count or synthesized slideshow cadence. It records `FAIL` only after an observed lane or guarded fixture step fails.
+
 The runner encodes raw Neovim key and typed bytes as ASCII hexadecimal JSON. A screenshot needs a private `capture_calibration` in the mode-0600 target file. The calibration records exact AX bounds, one CoreGraphics window ID, PNG scale, the one-pane fixture layout, the observed parent PTY grid, and an inward crop relative to that window. The pane rectangle and PTY grid are separate geometry domains: a normal-screen terminal may reserve a column, so the grid may be smaller than the pane but may never exceed it. The private target schema calls the grid `viewport_grid`; coordinators must replace the earlier `nvim_grid` field before a checkpoint run. Before capture, all recorded client, layout, and observed-grid values must match exactly. The runner then calls `screencapture -R` only for the calibrated screen rectangle; it never saves a full-window or desktop image or launches an Alacritty process. Its receipt records the rectangle, expected PNG pixels, and all bindings. A missing, malformed, or mismatched calibration leaves the screenshot UNVERIFIED. A valid PNG with the calibrated dimensions marks the runner screenshot step PASS; visual review remains required. A missing screenshot or any recorded lane failure exits with code 2.
 
 The calibration is deliberately one-frame-specific: it never adapts to a changed window, CoreGraphics window, layout, or parent viewport grid. Calibrate the pane rectangle and PTY grid independently from one observed frame, then inspect that frame's saved PNG before reuse. Client chrome or font changes that leave every recorded binding unchanged are outside the available Herdr and Accessibility metadata; do not reuse the calibration without a new verified pixel inspection. A live run must inspect the saved PNG before treating fixture content as verified.

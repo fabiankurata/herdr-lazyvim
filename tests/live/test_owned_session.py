@@ -12,6 +12,11 @@ import time
 import unittest
 from unittest import mock
 
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from runtime_lease import require_runtime_lease
+require_runtime_lease()
 from owned_session import (OwnedSession, OwnershipError, default_identities,
                            exception_evidence, fixture_identities,
                            isolated_environment, process_table, same_process,

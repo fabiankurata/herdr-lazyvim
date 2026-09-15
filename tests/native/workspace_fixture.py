@@ -6,11 +6,17 @@ from pathlib import Path
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import struct
 import termios
 import uuid
+
+LIVE = Path(__file__).resolve().parents[1] / "live"
+if str(LIVE) not in sys.path:
+    sys.path.insert(0, str(LIVE))
+from runtime_lease import LEASE_FIELDS, require_runtime_lease
 
 
 UNIX_SOCKET_PATH_MAX = 104
@@ -270,6 +276,7 @@ class ExistingAlacritty:
             action = "keystroke " + apple_string(text)
         else:
             action = {
+                "escape": "key code 53",
                 "cmd-enter": "key code 36 using {command down}",
                 "ctrl-s": 'keystroke "s" using {control down}',
             }[kind]
@@ -364,6 +371,8 @@ class WorkspaceFixture:
         self.before = None
         self.primary_error = None
         self.retention_reason = None
+        self._lease = None
+        self._lease_environment = None
 
     def create_runtime_root(self):
         root = Path(tempfile.mkdtemp(prefix="pr00-native-", dir="/tmp")).resolve()
@@ -452,17 +461,22 @@ class WorkspaceFixture:
         self.before = self.validate()
         self.create_runtime_root()
         label = "PR00 fixture " + uuid.uuid4().hex
+        runtime_directories = {
+            "HOME": self.fixture_root / "home",
+            "XDG_CONFIG_HOME": self.fixture_root / "config",
+            "XDG_CACHE_HOME": self.fixture_root / "cache",
+            "XDG_STATE_HOME": self.fixture_root / "state",
+            "XDG_DATA_HOME": self.fixture_root / "data",
+            "XDG_RUNTIME_DIR": self.fixture_root / "runtime",
+        }
+        for directory in runtime_directories.values():
+            directory.mkdir(parents=True, exist_ok=True)
         env = [
-            "HOME=" + str(self.fixture_root / "home"),
-            "XDG_CONFIG_HOME=" + str(self.fixture_root / "config"),
-            "XDG_CACHE_HOME=" + str(self.fixture_root / "cache"),
-            "XDG_STATE_HOME=" + str(self.fixture_root / "state"),
-            "XDG_DATA_HOME=" + str(self.fixture_root / "data"),
-            "XDG_RUNTIME_DIR=" + str(self.fixture_root / "runtime"),
+            key + "=" + str(directory) for key, directory in runtime_directories.items()
+        ] + [
             "HERDR_BIN_PATH=/usr/bin/false",
         ]
-        for item in env:
-            Path(item.split("=", 1)[1]).mkdir(parents=True, exist_ok=True) if item.split("=", 1)[0] != "HERDR_BIN_PATH" else None
+        env.extend(key + "=" + os.environ[key] for key in sorted(LEASE_FIELDS) if key in os.environ)
         result = self.runner(["tab", "create", "--workspace", self.target["workspace_id"], "--cwd", str(self.fixture_root),
                               "--label", label, *sum((["--env", item] for item in env), []), "--focus"])
         try:
@@ -561,13 +575,36 @@ class WorkspaceFixture:
         except BaseException as error:
             cleanup_error = error
             write_json(self.artifact / "fixture-teardown.json", {"status": "FAIL", "error": str(error)})
+        if self._lease is not None:
+            self._lease.close()
+            self._lease = None
+        if self._lease_environment is not None:
+            for key, value in self._lease_environment.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            self._lease_environment = None
         if self.primary_error is not None and cleanup_error is not None:
             raise self.primary_error from cleanup_error
         if cleanup_error is not None:
             raise cleanup_error
 
     def __enter__(self):
-        self.create()
+        self._lease_environment = {key: os.environ.get(key) for key in LEASE_FIELDS}
+        self._lease = require_runtime_lease()
+        try:
+            self.create()
+        except BaseException:
+            self._lease.close()
+            self._lease = None
+            for key, value in self._lease_environment.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            self._lease_environment = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc, traceback):

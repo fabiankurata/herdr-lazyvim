@@ -140,4 +140,6 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from runtime_lease import runtime_lease_owner
+    with runtime_lease_owner(repo=Path(__file__).resolve().parents[2]):
+        sys.exit(main())
