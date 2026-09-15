@@ -17,7 +17,8 @@ local function close_file(file)
 end
 
 local function remove_owned_file(path)
-  pcall(vim.uv.fs_unlink, path)
+  local ok, removed = pcall(vim.uv.fs_unlink, path)
+  return ok and removed and true or false
 end
 
 local function uuid()
@@ -94,7 +95,7 @@ local function write_path(path, root, comments, control)
       if not write_ok or not count or count == 0 then return nil, "could not save review comments" end
       offset = offset + count
     end
-    if not close_file(file) then return nil, "could not save review comments" end
+    if not close_file(file) then return nil, "could not close temporary review state" end
     closed, file = true, nil
     if not begin_commit(control) then return nil, CANCELLED end
     local rename_ok, committed = pcall(vim.uv.fs_rename, temporary, path)
@@ -102,11 +103,19 @@ local function write_path(path, root, comments, control)
     finish_commit(control)
     return true
   end, debug.traceback)
-  if file and not closed then close_file(file) end
-  if temporary then remove_owned_file(temporary) end
-  if not ok then return nil, written end
+  local cleanup = {}
+  if not ok or not written then
+    if file and not closed and not close_file(file) then table.insert(cleanup, "could not close temporary review state") end
+    if temporary and not remove_owned_file(temporary) then table.insert(cleanup, "could not remove temporary review state") end
+  end
+  local function with_cleanup(error)
+    if #cleanup == 0 then return error end
+    return tostring(error) .. "; additionally " .. table.concat(cleanup, "; ")
+  end
+  if not ok then return nil, with_cleanup(written) end
   if not written and write_error ~= CANCELLED then abort_commit(control) end
-  return written, write_error
+  if not written then return nil, with_cleanup(write_error) end
+  return true
 end
 
 function M.is_cancelled(error)

@@ -147,8 +147,9 @@ assert(vim.deep_equal(cancel_stages, { "list" }), "late cancelled callbacks have
 local operations = require("herdr_feedback.operations")
 local scheduled, in_method_operation = operations.scheduled, nil
 operations.scheduled = function(done, work)
-  in_method_operation = scheduled(done, work)
-  return in_method_operation
+  local operation, state, finish = scheduled(done, work)
+  in_method_operation = operation
+  return operation, state, finish
 end
 local returning_stages = {}
 assert(feedback.register_transport("cancel-before-handle", {
@@ -163,7 +164,7 @@ assert(feedback.register_transport("cancel-before-handle", {
 local returning = call(function(done) return feedback.send({ review = review(root), transport = "cancel-before-handle" }, done) end, "cancel before returned handle")
 operations.scheduled = scheduled
 assert(not returning.ok and returning.error.code == "cancelled" and vim.deep_equal(returning_stages, { "list" }),
-  "cancellation during extension return leaves the stage terminal")
+  "cancellation during extension return leaves the stage terminal: " .. vim.inspect(returning) .. " " .. vim.inspect(returning_stages))
 
 -- A confirmed registered delivery remains delivered when acknowledgement code
 -- throws after the delivery boundary.

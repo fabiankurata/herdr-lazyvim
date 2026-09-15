@@ -82,8 +82,8 @@ local function save_last_agents()
   pcall(vim.fn.writefile, { vim.json.encode(config.last_agents) }, last_agents_file())
 end
 
-local function read_review(root)
-  local listed = operations.list({ review = context.review_for_root(root) })
+local function read_review(root, control)
+  local listed = operations.list({ review = context.review_for_root(root) }, control)
   if not listed.ok then return nil, listed.error.message end
   return listed.value
 end
@@ -798,7 +798,7 @@ end
 local function send(options, public, state, finish, root, execution)
   local records, error
   if public then
-    records, error = read_review(root)
+    records, error = read_review(root, state)
     if not records then return operations.failure("invalid_state", error) end
   elseif not load(root_for(0)) then
     return
@@ -877,14 +877,25 @@ local function send(options, public, state, finish, root, execution)
           save_last_agents()
           if active_root == origin.root then comments = remaining; clear_decorations(); refresh() end
           notify(string.format("Pasted %d comment%s to %s; agent execution is not confirmed", count, count == 1 and "" or "s", agent_name(agent)))
-          local focus_options = execution and vim.deepcopy(execution.options) or { text = true }
-          vim.system({ herdr, "agent", "focus", agent.pane_id }, focus_options)
         end)
-        if public then
+        local function delivered(warning)
+          if not public then return end
           local value = { outcome = "delivered_to_input", batch_id = batch_id, members = origin.members }
-          if not post_ok then value.warning = "post-delivery UI update failed: " .. tostring(post_error) end
+          if warning then value.warning = warning end
           finish({ ok = true, value = value })
         end
+        if not post_ok then return delivered("post-delivery UI update failed: " .. tostring(post_error)) end
+        local focus_options = execution and vim.deepcopy(execution.options) or { text = true }
+        local focus_started, focus_error = pcall(vim.system, { herdr, "agent", "focus", agent.pane_id }, focus_options, function(focus)
+          vim.schedule(function()
+            if state and state.finished then return end
+            if type(focus) ~= "table" or focus.code ~= 0 then
+              return delivered("post-delivery focus failed")
+            end
+            delivered()
+          end)
+        end)
+        if not focus_started then return delivered("post-delivery focus failed: " .. tostring(focus_error)) end
       end)
     end)
     if not started then return complete_failure("failed", "could not start Herdr delivery: " .. tostring(startup_error)) end

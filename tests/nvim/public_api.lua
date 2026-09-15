@@ -247,6 +247,7 @@ vim.system = function(argv, _, done)
     pending.payload = argv[5]
   elseif argv[2] == "agent" and argv[3] == "focus" then
     pending.focus = true
+    vim.schedule(function() done({ code = 0, stdout = "", stderr = "" }) end)
   else
     error("unexpected fake command: " .. vim.inspect(argv))
   end

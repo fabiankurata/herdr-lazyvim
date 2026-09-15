@@ -155,6 +155,7 @@ local function send_with_transport(request, transport, done)
         if token.status == "waiting" then consume() end
       end
       local ok, handle = pcall(transport[stage], vim.deepcopy(values), callback)
+      if state.finished or state.active_stage ~= token or token.status == "terminal" then return end
       if not ok then
         token.status, state.active_stage = "terminal", nil
         if stage == "deliver" then return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept")) end
@@ -171,6 +172,7 @@ local function send_with_transport(request, transport, done)
 
     local function deliver(target)
       if state.finished then return end
+      state.delivery = "started"
       batch.target = vim.deepcopy(target)
       invoke("deliver", {
         batch = vim.deepcopy(batch),
@@ -181,9 +183,10 @@ local function send_with_transport(request, transport, done)
         if type(value) ~= "table" or value.outcome ~= "delivered_to_input" then
           return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept"))
         end
+        state.delivery = "confirmed"
         if state.finished then return end
-        local acknowledged = operations.acknowledge(batch.review, batch.members, state)
-        if not acknowledged.ok then
+        local called, acknowledged = pcall(operations.acknowledge, batch.review, batch.members, state)
+        if not called or not acknowledged.ok then
           return finish({ ok = true, value = {
             outcome = "delivered_to_input", batch_id = batch.id, warning = "acknowledgement could not be saved",
           } })
@@ -235,10 +238,11 @@ local function send_with_transport(request, transport, done)
   local cancel = operation.cancel
   operation.cancel = function()
     cancel()
+    if state.delivery == "confirmed" then return end
     local token = state.active_stage
     if token then
       state.active_stage, token.status = nil, "terminal"
-      pcall(token.handle.cancel)
+      if type(token.handle) == "table" and type(token.handle.cancel) == "function" then pcall(token.handle.cancel) end
       if token.name == "deliver" then return finish(operations.failure("uncertain", "transport delivery was not confirmed; comments were kept")) end
     end
     finish(cancelled())
