@@ -27,6 +27,13 @@ local function realpath(path)
   return vim.uv.fs_realpath(path) or vim.fs.normalize(path)
 end
 
+local function relative_path(root, path)
+  if type(vim.fs.relpath) == "function" then return vim.fs.relpath(root, path) end
+  local separator = package.config:sub(1, 1)
+  local prefix = root:sub(-1) == separator and root or root .. separator
+  if path:sub(1, #prefix) == prefix then return path:sub(#prefix + 1) end
+end
+
 local function diffview_location(buf)
   local ok, lib = pcall(require, "diffview.lib")
   local view = ok and lib.get_current_view() or nil
@@ -56,7 +63,7 @@ local function buffer_location(buf)
   local root = realpath(vim.fs.root(name, ".git") or vim.fn.getcwd())
   return {
     root = root,
-    file = vim.fs.relpath(root, realpath(name)) or name,
+    file = relative_path(root, realpath(name)) or name,
     removed = false,
   }
 end
@@ -1097,6 +1104,7 @@ M._format_all = format_all
 M._format_comments = format_comments
 M._selection = selection
 M._buffer_location = buffer_location
+M._relative_path = relative_path
 M._agent_label = agent_label
 M._tab_labels = tab_labels
 M._decorate_comment = decorate_comment
