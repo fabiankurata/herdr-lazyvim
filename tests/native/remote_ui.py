@@ -226,13 +226,20 @@ def run_clipboard_exercise(source, runtime, fixture, nvim, socket, server_env, *
     """Exercise only the explicit native clipboard option after remote-UI readiness."""
     result = receipt if receipt is not None else {}
     result.update(status="FAIL", bridge=bridge, focus="UNVERIFIED", escape="UNVERIFIED")
-    swiftc = shutil.which("swiftc", path=server_env.get("PATH"))
-    if swiftc is None:
-        result.update(status="UNVERIFIED", reason="swiftc-unavailable", bridge="UNVERIFIED")
-        return result
     helper_source = Path(source) / "tests/native/clipboard.swift"
     helper = Path(runtime) / "clipboard-helper"
-    subprocess.run([swiftc, str(helper_source), "-o", str(helper)], check=True, capture_output=True, text=True, timeout=30)
+    if bridge == "NATIVE":
+        if sys.platform != "darwin":
+            result.update(status="UNVERIFIED", reason="macos-appkit-unavailable", bridge="UNVERIFIED")
+            return result
+        swiftc = shutil.which("swiftc", path=server_env.get("PATH"))
+        if swiftc is None:
+            result.update(status="UNVERIFIED", reason="swiftc-unavailable", bridge="UNVERIFIED")
+            return result
+        subprocess.run([swiftc, str(helper_source), "-o", str(helper)], check=True,
+                       capture_output=True, text=True, timeout=30)
+    elif client_factory is ClipboardProtocol:
+        raise OwnershipError("simulated clipboard bridge requires an injected fixture client")
     original = remote_expression(nvim, socket, clipboard_lua_state(), env=server_env)
     scratch = remote_expression(nvim, socket,
         lua_function("vim.cmd('belowright new'); vim.bo.buftype='nofile'; vim.bo.bufhidden='wipe'; vim.bo.swapfile=false; vim.api.nvim_buf_set_lines(0,0,-1,false,{}); return vim.json.encode({win=vim.api.nvim_get_current_win(),buf=vim.api.nvim_get_current_buf()})"),

@@ -243,18 +243,28 @@ for line in sys.stdin:
                 return original
             raise AssertionError(lua)
 
-        with mock.patch.object(remote_ui.shutil, "which", return_value="/fake/swiftc"), \
-             mock.patch.object(remote_ui.subprocess, "run"), \
+        with mock.patch.object(remote_ui.subprocess, "run") as compile_helper, \
              mock.patch.object(remote_ui, "remote_expression", side_effect=fake_remote), \
              mock.patch.object(remote_ui.uuid, "uuid4", side_effect=[type("U", (), {"hex": "a" * 32})(), type("U", (), {"hex": "b" * 32})()]):
             result = remote_ui.run_clipboard_exercise(source, runtime, Fixture(), "nvim", "/tmp/socket", {"PATH": "/bin"},
                                                        client_factory=client_factory, bridge="SIMULATED")
+        compile_helper.assert_not_called()
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["bridge"], "SIMULATED")
         self.assertEqual(calls, [("focus",), ("key", "text", '"+p'), ("focus",), ("key", "text", 'gg"+yy')])
         self.assertEqual(clients[0].commands, [{"op": "seed", "nonce": paste_nonce},
                                                  {"op": "check", "expected": yank_nonce + "\n"}])
         self.assertEqual(clients[0].command_line[1:3], ["--general", "--idle-timeout-ms"])
+
+    def test_native_clipboard_is_unverified_without_macos_appkit(self):
+        with mock.patch.object(remote_ui.sys, "platform", "linux"), \
+             mock.patch.object(remote_ui.subprocess, "run") as compile_helper:
+            result = remote_ui.run_clipboard_exercise(
+                Path(self.temp.name), Path(self.temp.name), None, "nvim", "/tmp/socket", {"PATH": "/bin"})
+        compile_helper.assert_not_called()
+        self.assertEqual(result["status"], "UNVERIFIED")
+        self.assertEqual(result["reason"], "macos-appkit-unavailable")
+        self.assertEqual(result["bridge"], "UNVERIFIED")
 
     def test_bidirectional_driver_forwards_input_and_reaps_on_readiness_failure(self):
         child = Path(self.temp.name) / "child.py"
@@ -445,6 +455,10 @@ for line in sys.stdin:
 
     def test_run_lane_uses_archived_lazyvim_profile_with_simulated_pty(self):
         receipt, artifact = self.run_source_lane(profile="lazy")
+        if receipt["status"] == "UNVERIFIED":
+            self.assertEqual(receipt["lazyvim"]["scope"], "local-dependency-preflight")
+            self.assertTrue(receipt["lazyvim"]["missing_dependencies"])
+            self.skipTest("UNVERIFIED: exact local LazyVim dependency sources are unavailable")
         self.assertEqual(receipt["status"], "PASS")
         self.assertEqual(receipt["profile"], "lazy")
         ready = json.loads((artifact / "remote-ui-ready.json").read_text())
