@@ -1,0 +1,73 @@
+*herdr-feedback.nvim*  Local review annotations for Herdr workflows
+
+=============================================================================
+CONTENTS                                                        *herdr-feedback*
+
+SETUP                                                            *herdr-feedback-setup*
+
+  require("herdr_feedback").setup({ keymaps = false })
+
+Setup is synchronous and returns { ok = true, value = ... }. It is idempotent.
+The legacy HerdrReview commands and mappings remain available through the
+compatibility entrypoint. Core loading does not require Herdr, LazyVim, themes,
+or optional review plugins.
+
+API                                                              *herdr-feedback-api*
+
+All I/O operations accept done(result), schedule completion once, and return a
+handle with cancel(). Existing-record operations require an explicit ReviewKey.
+The package reads and writes the existing { version, root, comments } envelope.
+The legacy command UI uses the same records.
+
+  local feedback = require("herdr_feedback")
+  feedback.add({ bufnr = 0, range = { start_line = 2, end_line = 4 },
+    text = "Explain this branch" }, done)
+  feedback.edit(id, { review = review_key, expected_revision = 1,
+    text = "Add a test" }, done)
+  feedback.delete(id, { review = review_key, expected_revision = 2 }, done)
+  feedback.list({ review = review_key }, done)
+  feedback.export({ review = review_key, annotation_ids = { id } }, done)
+  feedback.send({ review = review_key, annotation_ids = { id }, target = target,
+    submit = false }, done)
+  feedback.send({ review = review_key, annotation_ids = { id },
+    transport = "capture" }, done)
+
+add captures the buffer, source range, and root when called. edit and delete
+return revision_conflict when the stored revision differs from expected_revision.
+Bundled Herdr send waits for discovery and input delivery. It returns
+delivered_to_input after the fake or real input command accepts the payload.
+A selected registered transport returns only its confirmed delivery outcome.
+A cancellation before a mutation returns cancelled and preserves drafts. A
+cancellation after input starts cannot retract accepted bytes. A nonzero input
+command result is uncertain because the command may have accepted the payload.
+
+ReviewKey contains worktree.authority.host, worktree.authority.path_authority,
+worktree.canonical_root, and review_id. PR02 supports the local authority and
+the draft review only. Other complete keys return invalid_request before a
+store read or write. The supplied supported key is retained while the legacy
+per-worktree state path remains in use.
+
+When supplied, target contains connection, workspace_id, tab_id, pane_id,
+agent_session_id, and worktree. The target worktree must equal the review
+worktree. Before sending input, the bundled Herdr boundary lists current agents
+on the supplied socket and requires the observed workspace, tab, pane, and ID
+session reference to equal target. A missing or changed occupant returns
+target_mismatch without sending bytes. This default preflight has a remaining
+race before Herdr accepts input. submit=true appends the terminal submit byte.
+strict_session_guard=true returns unsupported_capability before input because
+this boundary has no conditional session delivery. Without target, public send
+uses the legacy discovery flow. The HerdrReviewSend command keeps its agent
+picker behavior.
+
+transport is an optional nonempty registered transport name. With transport,
+send calls list_targets, validate_target, then deliver once. list_targets
+returns { targets = { target } }; an omitted target requires exactly one listed
+target. deliver receives copied batch/target values and returns
+{ outcome = "delivered_to_input" }. Only that outcome acknowledges the captured
+ID/revision members. Cancellation before deliver is cancelled; after deliver,
+cancelled, failed, or malformed completion is uncertain and keeps drafts.
+
+setup validates core option types before configuration changes. register_source_adapter
+and register_transport validate their required methods and return synchronously.
+
+ vim:tw=78:ts=8:noet:ft=help

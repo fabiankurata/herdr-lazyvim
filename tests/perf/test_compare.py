@@ -33,6 +33,58 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(stats['failed'], 1)
         self.assertEqual(stats['metrics'], {})
 
+    def test_package_extraction_requires_literal_equivalence_per_pair(self):
+        observations = [
+            {'index': 0, 'side': 'baseline', 'status': 'PASS', 'behavior': {
+                'old_store_bytes': 'old', 'old_store_after_access_bytes': 'normalized',
+                'final_store_bytes': 'final', 'export_payload': 'export',
+            }},
+            {'index': 0, 'side': 'candidate', 'status': 'PASS', 'behavior': {
+                'old_store_bytes': 'old', 'old_store_after_access_bytes': 'normalized',
+                'final_store_bytes': 'final', 'export_payload': 'export',
+            }},
+        ]
+        self.assertEqual(compare.package_extraction_equivalence(observations), [])
+        observations[1]['behavior']['final_store_bytes'] = 'changed'
+        self.assertEqual(compare.package_extraction_equivalence(observations), [
+            {'index': 0, 'fields': ['final_store_bytes']},
+        ])
+
+    def test_package_extraction_metrics_rejects_missing_literal_bytes(self):
+        observed = {
+            'status': 'PASS', 'export_entrypoint': 'herdr_review.send',
+            'old_store_bytes': 'old', 'old_store_after_access_bytes': 'normalized',
+            'final_store_bytes': 'final', 'export_payload': 'export',
+            'module_setup_ms': 1.0, 'sequential_crud_ms': 2.0,
+            'export_ms': 3.0, 'old_format_store_access_ms': 4.0,
+        }
+        self.assertEqual(compare.package_extraction_metrics(observed)['export_ms'], 3.0)
+        del observed['final_store_bytes']
+        with self.assertRaises(ValueError):
+            compare.package_extraction_metrics(observed)
+
+    def test_package_extraction_p95_budget_includes_the_fixed_allowance(self):
+        measured = {
+            'baseline': {'metrics': {
+                name: {'p95': 100.0} for name in (
+                    'module_setup_ms', 'sequential_crud_ms', 'export_ms',
+                    'old_format_store_access_ms',
+                )
+            }},
+            'candidate': {'metrics': {
+                name: {'p95': 145.0} for name in (
+                    'module_setup_ms', 'sequential_crud_ms', 'export_ms',
+                    'old_format_store_access_ms',
+                )
+            }},
+        }
+        self.assertEqual(compare.package_extraction_regressions(measured), [])
+        measured['candidate']['metrics']['export_ms']['p95'] = 145.1
+        self.assertEqual(compare.package_extraction_regressions(measured), [{
+            'metric': 'export_ms', 'baseline_p95': 100.0,
+            'candidate_p95': 145.1, 'budget': 145.0,
+        }])
+
     def test_interleaved_current_callable_on_exact_archives_without_old_harness(self):
         with tempfile.TemporaryDirectory(prefix='hf-', dir='/tmp') as directory:
             root = Path(directory) / 'repository'
