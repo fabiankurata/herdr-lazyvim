@@ -62,6 +62,10 @@ assert(setup.ok, "public setup accepts gutter")
 assert(vim.fn.maparg("<leader>rc", "n"):find("custom", 1, true), "gutter setup preserves user mappings")
 assert(feedback.setup({ comment_range_style = "gutter" }).value.already_configured, "gutter setup is idempotent")
 assert(not feedback.setup({ comment_range_style = "not-a-style" }).ok, "invalid styles remain rejected")
+vim.cmd("doautocmd BufEnter")
+local marks = vim.api.nvim_buf_get_extmarks(0, require("herdr_feedback.legacy")._namespace, 0, -1, { details = true })
+assert(#marks > 0 and marks[1][4].sign_text and not marks[1][4].hl_group and not marks[1][4].line_hl_group,
+  "gutter rendering has a sign without a range tint")
 
 local listed = call(function(done) return feedback.list({ review = review(root) }, done) end, "list before transport")
 assert(listed.ok and #listed.value == 3, "fixture drafts persist")
@@ -83,6 +87,46 @@ vim.wait(50)
 assert(vim.deep_equal(stages, { "list" }), "late list callback has no later side effects")
 assert(bytes(root) == before, "late list callback does not acknowledge drafts")
 
+-- Other callback/return orderings share the same terminal-stage invariant.
+for name, list_targets in pairs({
+  ["callback-then-throw"] = function(done)
+    done({ ok = true, value = { targets = { { name = "late" } } } })
+    error("controlled list throw")
+  end,
+  ["sync-callback-invalid-handle"] = function(done)
+    done({ ok = true, value = { targets = { { name = "late" } } } })
+    return {}
+  end,
+}) do
+  local order = {}
+  assert(feedback.register_transport(name, {
+    list_targets = function(_, done) order[#order + 1] = "list"; return list_targets(done) end,
+    validate_target = function() order[#order + 1] = "validate"; return { cancel = function() end } end,
+    deliver = function() order[#order + 1] = "deliver"; return { cancel = function() end } end,
+  }).ok)
+  local value = call(function(done) return feedback.send({ review = review(root), transport = name }, done) end, name)
+  assert(not value.ok and value.error.code == "invalid_state", name .. " is terminal")
+  vim.wait(30)
+  assert(vim.deep_equal(order, { "list" }), name .. " cannot start later stages")
+end
+
+-- Duplicate and late callbacks after cancellation must remain inert.
+local cancel_callback, cancel_stages = nil, {}
+assert(feedback.register_transport("late-cancel", {
+  list_targets = function(_, done) cancel_stages[#cancel_stages + 1] = "list"; cancel_callback = done; return { cancel = function() end } end,
+  validate_target = function() cancel_stages[#cancel_stages + 1] = "validate"; return { cancel = function() end } end,
+  deliver = function() cancel_stages[#cancel_stages + 1] = "deliver"; return { cancel = function() end } end,
+}).ok)
+local cancelled, cancelled_calls = nil, 0
+local cancel_handle = feedback.send({ review = review(root), transport = "late-cancel" }, function(value) cancelled_calls = cancelled_calls + 1; cancelled = value end)
+wait_for(function() return cancel_callback ~= nil end, "cancellable list starts")
+cancel_handle.cancel()
+cancel_callback({ ok = true, value = { targets = { { name = "late" } } } })
+cancel_callback({ ok = true, value = { targets = { { name = "late" } } } })
+wait_for(function() return cancelled ~= nil end, "cancelled list completes")
+assert(cancelled_calls == 1 and not cancelled.ok and cancelled.error.code == "cancelled", "cancellation completes once")
+assert(vim.deep_equal(cancel_stages, { "list" }), "late cancelled callbacks have no side effects")
+
 -- F4: a package exception produces one structured completion rather than
 -- escaping the scheduler and abandoning the caller.
 local completion = require("herdr_feedback.completion")
@@ -103,6 +147,18 @@ vim.uv.random = original_random
 assert(first == nil, "thrown transaction reports failure")
 local second, second_error = store.update(review(root), function(records) return records, true end)
 assert(second and not second_error, "writer after thrown transaction acquires released lock")
+
+-- A missing bundled executable is a definite startup failure, not a lost done.
+vim.env.HERDR_SOCKET_PATH = "missing-socket"
+local missing_target = {
+  connection = { authority = review(root).worktree.authority, socket = "missing-socket" },
+  workspace_id = "workspace", tab_id = "tab", pane_id = "pane", agent_session_id = "agent", worktree = review(root).worktree,
+}
+local original_system = vim.system
+vim.system = function() error("controlled executable startup failure") end
+local missing = call(function(done) return feedback.send({ review = review(root), target = missing_target }, done) end, "missing executable")
+assert(not missing.ok and missing.error.code == "failed", "unstartable bundled executable is structured")
+vim.system = original_system
 
 -- F2 and F4: explicit target subprocesses retain the invocation executable and
 -- socket, and a post-delivery focus throw cannot lose confirmed completion.
@@ -136,9 +192,11 @@ assert(first_command.options.env.HERDR_SESSION == nil and first_command.options.
 pending.preflight({ code = 0, stdout = vim.json.encode({ result = { agents = {
   { workspace_id = "workspace", tab_id = "tab", pane_id = "pane", agent_session = { kind = "id", value = "agent" } },
 } } }), stderr = "" })
+vim.env.HERDR_SOCKET_PATH = "socket-C"; vim.env.HERDR_BIN_PATH = "herdr-C"; vim.env.HERDR_CLIENT_SOCKET_PATH = "competing"
 wait_for(function() return pending.delivery ~= nil end, "explicit delivery starts")
 assert(command_calls[2].argv[1] == "herdr-A" and command_calls[2].options.env.HERDR_SOCKET_PATH == "socket-A", "delivery uses captured route")
-vim.env.HERDR_SOCKET_PATH = "socket-C"
+assert(command_calls[2].options.env.HERDR_CLIENT_SOCKET_PATH == nil, "delivery removes competing routing selector")
+vim.env.HERDR_SOCKET_PATH = "socket-D"; vim.env.HERDR_BIN_PATH = "herdr-D"; vim.env.HERDR_SESSION = "third"
 pending.delivery({ code = 0, stdout = "", stderr = "" })
 wait_for(function() return sent ~= nil end, "focus failure still completes delivered operation")
 assert(sent_callbacks == 1 and sent.ok and sent.value.outcome == "delivered_to_input", "focus failure retains confirmed delivery")
