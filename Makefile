@@ -1,4 +1,4 @@
-.PHONY: audit test test-isolated test-operations test-package-extraction live-isolation perf-compare perf-package-extraction
+.PHONY: audit test test-isolated test-operations test-package-extraction test-review-corrections live-isolation perf-compare perf-package-extraction
 
 audit:
 	bash scripts/check-public.sh
@@ -15,6 +15,7 @@ test-isolated:
 	HERDR_TEST_FIXTURE_ROOT="$$HERDR_TEST_STATE_ROOT/async-fixture" HERDR_TEST_REPO="$(CURDIR)" HERDR_NVIM_TEST_SCRIPT="$(CURDIR)/tests/nvim/async_root_baseline.lua" nvim --headless -u NONE -i NONE -l tests/nvim/run_test.lua
 	$(MAKE) test-operations
 	$(MAKE) test-package-extraction
+	$(MAKE) test-review-corrections
 	python3 tests/public_scan.py
 	python3 tests/contracts/check.py
 	bash tests/live/test-isolation
@@ -31,6 +32,10 @@ test-operations:
 test-package-extraction:
 	@test -n "$$HERDR_TEST_STATE_ROOT" || { echo 'use make test-package-extraction through the isolated test runner' >&2; exit 1; }
 	HERDR_TEST_REPO="$(CURDIR)" HERDR_NVIM_TEST_SCRIPT="$(CURDIR)/tests/nvim/public_api.lua" nvim --headless -u NONE -i NONE -l tests/nvim/run_test.lua
+
+test-review-corrections:
+	@test -n "$$HERDR_TEST_STATE_ROOT" || { echo 'use make test-review-corrections through the isolated test runner' >&2; exit 1; }
+	HERDR_TEST_REPO="$(CURDIR)" HERDR_NVIM_TEST_SCRIPT="$(CURDIR)/tests/nvim/review_corrections.lua" nvim --headless -u NONE -i NONE -l tests/nvim/run_test.lua
 
 live-isolation:
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/live/isolated_test.py bash $(CURDIR)/tests/live/test-isolation
