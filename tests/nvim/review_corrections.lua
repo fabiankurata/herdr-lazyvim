@@ -249,6 +249,38 @@ assert(primary == nil and type(primary_error) == "string" and primary_error:find
 local recovered, recovered_error = store.update(review(root), function(records) return records, true end)
 assert(recovered and not recovered_error, "writer after cleanup diagnostic acquires released lock")
 
+-- The same primary-plus-cleanup diagnostic survives the public annotation-ID
+-- path and does not abandon its scheduled completion.
+local public_cleanup_before, public_cleanup_result, public_cleanup_calls = bytes(root), nil, 0
+local public_cleanup_open, public_cleanup_close = vim.uv.fs_open, vim.uv.fs_close
+local public_cleanup_lock
+vim.uv.fs_open = function(path, flags, mode, callback)
+  local file, message, code = public_cleanup_open(path, flags, mode, callback)
+  if not callback and file and path:find(".lock-v2", 1, true) then public_cleanup_lock = file end
+  return file, message, code
+end
+vim.uv.fs_close = function(file, callback)
+  if not callback and file == public_cleanup_lock then
+    public_cleanup_close(file)
+    return nil, "controlled public cleanup failure"
+  end
+  return public_cleanup_close(file, callback)
+end
+vim.uv.random = function() error("controlled public annotation-id failure") end
+feedback.add({ bufnr = vim.api.nvim_get_current_buf(), range = { start_line = 1, end_line = 1 }, text = "annotation cleanup failure" }, function(value)
+  public_cleanup_calls = public_cleanup_calls + 1
+  public_cleanup_result = value
+end)
+wait_for(function() return public_cleanup_result ~= nil end, "public annotation-ID cleanup failure completes")
+vim.uv.random, vim.uv.fs_open, vim.uv.fs_close = original_random, public_cleanup_open, public_cleanup_close
+assert(public_cleanup_calls == 1 and not public_cleanup_result.ok and public_cleanup_result.error.code == "write_failed"
+    and public_cleanup_result.error.message:find("controlled public annotation-id failure", 1, true)
+    and public_cleanup_result.error.message:find("additionally could not release", 1, true)
+    and bytes(root) == public_cleanup_before,
+  "public annotation-ID cleanup failure retains both diagnostics without writing")
+local public_cleanup_recovered, public_cleanup_recovered_error = store.update(review(root), function(records) return records, true end)
+assert(public_cleanup_recovered and not public_cleanup_recovered_error, "writer after public annotation-ID cleanup failure acquires released lock")
+
 -- F4-A: valid JSON with an invalid target-preflight envelope is a structured
 -- pre-delivery refusal, not an uncaught scheduler error.
 local preflight_socket, preflight_bin = vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH
