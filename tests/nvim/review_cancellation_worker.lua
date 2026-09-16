@@ -52,8 +52,10 @@ if role == "cancelled" then
   end)
   vim.schedule(function() operation.cancel(); touch("cancel-issued") end)
   assert(vim.wait(5000, function() return result ~= nil end, 10), "cancelled operation did not complete")
-  assert(callbacks == 1 and not result.ok and result.error.code == "cancelled", "cancelled operation committed or completed incorrectly")
-  assert(vim.fn.writefile({ vim.json.encode({ callbacks = callbacks, code = result.error.code }) }, marker("cancelled-result.json")) == 0)
+  assert(vim.fn.writefile({ vim.json.encode({
+    callbacks = callbacks,
+    code = result.ok and "ok" or result.error.code,
+  }) }, marker("cancelled-result.json")) == 0)
   touch("cancelled-done")
   vim.cmd("qa!")
   return

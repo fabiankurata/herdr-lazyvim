@@ -301,12 +301,13 @@ class ReviewConcurrencyTests(unittest.TestCase):
                 self.wait_for(control / "holder-locked", holder)
                 cancelled = self.start_cancellation_worker(root, "cancelled", shared_state, control, "cancelled")
                 self.wait_for(control / "cancel-issued", cancelled)
+                self.wait_for(control / "cancelled-done", cancelled)
                 self.assertEqual(state_path.read_bytes(), original, "cancelled contender wrote while holder had the lock")
+                self.assertEqual(json.loads((control / "cancelled-result.json").read_text()),
+                                 {"callbacks": 1, "code": "cancelled"})
                 (control / "release-holder").write_text("release\n")
                 self.finish_worker(holder, "lock holder")
                 self.finish_worker(cancelled, "cancelled public mutation")
-                self.assertEqual(json.loads((control / "cancelled-result.json").read_text()),
-                                 {"callbacks": 1, "code": "cancelled"})
                 persisted = json.loads(state_path.read_text())
                 self.assertEqual([item["text"] for item in persisted["comments"]],
                                  ["committed base", "holder mutation"])

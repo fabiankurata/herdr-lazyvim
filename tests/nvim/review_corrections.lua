@@ -192,6 +192,14 @@ assert(not thrown.ok and thrown.error.code == "failed", "scheduled exception is 
 -- F4: a throw after a kernel lock is held releases it. The next transaction
 -- must acquire the same lock and write successfully.
 local store = require("herdr_feedback.store")
+local direct, direct_error = store.update(review(root), function()
+  error("controlled direct transaction failure")
+end)
+assert(direct == nil and type(direct_error) == "string" and direct_error:find("controlled direct transaction failure", 1, true),
+  "direct transaction exception retains its original error")
+local direct_recovered, direct_recovered_error = store.update(review(root), function(records) return records, true end)
+assert(direct_recovered and not direct_recovered_error, "writer after direct transaction exception acquires released lock")
+
 local original_random = vim.uv.random
 local first = store.update(review(root), function(records)
   vim.uv.random = function() error("controlled temporary identity failure") end
@@ -201,6 +209,23 @@ vim.uv.random = original_random
 assert(first == nil, "thrown transaction reports failure")
 local second, second_error = store.update(review(root), function(records) return records, true end)
 assert(second and not second_error, "writer after thrown transaction acquires released lock")
+
+-- The public annotation-ID path also reports the underlying failure once and
+-- leaves the durable draft unchanged.
+local annotation_before = bytes(root)
+local annotation_result, annotation_calls = nil, 0
+vim.uv.random = function() error("controlled annotation-id failure") end
+feedback.add({ bufnr = vim.api.nvim_get_current_buf(), range = { start_line = 1, end_line = 1 }, text = "annotation id failure" }, function(value)
+  annotation_calls = annotation_calls + 1
+  annotation_result = value
+end)
+wait_for(function() return annotation_result ~= nil end, "annotation-ID failure completes")
+vim.uv.random = original_random
+assert(annotation_calls == 1 and not annotation_result.ok and annotation_result.error.code == "write_failed"
+    and annotation_result.error.message:find("controlled annotation-id failure", 1, true) and bytes(root) == annotation_before,
+  "annotation-ID exception retains its original error without writing")
+local annotation_recovered, annotation_recovered_error = store.update(review(root), function(records) return records, true end)
+assert(annotation_recovered and not annotation_recovered_error, "writer after annotation-ID exception acquires released lock")
 
 -- Retain a primary transaction exception when lock cleanup also reports a
 -- failure, while still proving the next writer owns a released descriptor.
@@ -215,16 +240,47 @@ vim.uv.fs_close = function(file, callback)
   if not callback and file == lock_descriptor then original_close(file); return nil, "controlled cleanup failure" end
   return original_close(file, callback)
 end
-local cleanup_random = vim.uv.random
-local primary, primary_error = store.update(review(root), function(records)
-  vim.uv.random = function() error("controlled primary failure") end
-  return records, true
+local primary, primary_error = store.update(review(root), function()
+  error("controlled primary direct failure")
 end)
-vim.uv.random, vim.uv.fs_open, vim.uv.fs_close = cleanup_random, original_open, original_close
-assert(primary == nil and primary_error:find("controlled primary failure", 1, true)
+vim.uv.fs_open, vim.uv.fs_close = original_open, original_close
+assert(primary == nil and type(primary_error) == "string" and primary_error:find("controlled primary direct failure", 1, true)
     and primary_error:find("additionally could not release", 1, true), "primary plus cleanup failure retains both contexts")
 local recovered, recovered_error = store.update(review(root), function(records) return records, true end)
 assert(recovered and not recovered_error, "writer after cleanup diagnostic acquires released lock")
+
+-- F4-A: valid JSON with an invalid target-preflight envelope is a structured
+-- pre-delivery refusal, not an uncaught scheduler error.
+local preflight_socket, preflight_bin = vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = "preflight-socket", "preflight-herdr"
+local preflight_target = {
+  connection = { authority = review(root).worktree.authority, socket = "preflight-socket" },
+  workspace_id = "workspace", tab_id = "tab", pane_id = "pane", agent_session_id = "agent", worktree = review(root).worktree,
+}
+for _, malformed_stdout in ipairs({ "7", vim.json.encode({ result = 7 }) }) do
+  local system, pending, input_attempts = vim.system, nil, 0
+  vim.system = function(argv, _, done)
+    if argv[2] == "agent" and argv[3] == "list" then pending = done
+    elseif argv[2] == "pane" and argv[3] == "send-text" then input_attempts = input_attempts + 1
+    else error("unexpected explicit preflight child") end
+    return {}
+  end
+  local preflight_before, preflight_result, preflight_calls = bytes(root), nil, 0
+  feedback.send({ review = review(root), target = preflight_target }, function(value)
+    preflight_calls = preflight_calls + 1
+    preflight_result = value
+  end)
+  wait_for(function() return pending ~= nil end, "malformed target preflight starts")
+  vim.v.errmsg = ""
+  pending({ code = 0, stdout = malformed_stdout, stderr = "" })
+  wait_for(function() return preflight_result ~= nil end, "malformed target preflight completes")
+  vim.wait(20)
+  vim.system = system
+  assert(preflight_calls == 1 and not preflight_result.ok and preflight_result.error.code == "invalid_state"
+      and input_attempts == 0 and bytes(root) == preflight_before and vim.v.errmsg == "",
+    "malformed target preflight is terminal without scheduler error")
+end
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = preflight_socket, preflight_bin
 
 -- A missing bundled executable is a definite startup failure, not a lost done.
 local original_socket, original_bin = vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH
