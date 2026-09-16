@@ -865,6 +865,13 @@ local function send(options, public, state, finish, root, execution)
     end
     if public then finish(operations.failure(code, message)) else notify(message, vim.log.levels.WARN) end
   end
+  local function schedule_pre_delivery(work)
+    vim.schedule(function()
+      if state and state.finished then return end
+      local ok, thrown = xpcall(work, debug.traceback)
+      if not ok then complete_failure("failed", "Herdr target preflight failed: " .. tostring(thrown)) end
+    end)
+  end
   local function deliver(agent)
     if state and state.cancelled then return complete_failure("cancelled", "operation was cancelled") end
     if input_started then return end
@@ -929,13 +936,16 @@ local function send(options, public, state, finish, root, execution)
       local started, startup_error = pcall(vim.system, { herdr, "agent", "list" }, command_options, function(result)
         if preflight_finished then return end
         preflight_finished = true
-        vim.schedule(function()
+        schedule_pre_delivery(function()
           if state and state.cancelled then return complete_failure("cancelled", "operation was cancelled") end
+          if type(result) ~= "table" or type(result.code) ~= "number" or type(result.stdout) ~= "string" then
+            return complete_failure("invalid_state", "Herdr returned an invalid target preflight")
+          end
           if result.code ~= 0 then
             return complete_failure("failed", "Herdr did not return the target preflight")
           end
           local ok, response = pcall(vim.json.decode, result.stdout)
-          local rows = ok and response and response.result and response.result.agents
+          local rows = ok and type(response) == "table" and type(response.result) == "table" and response.result.agents
           if type(rows) ~= "table" then
             return complete_failure("invalid_state", "Herdr returned an invalid target preflight")
           end

@@ -1,6 +1,7 @@
 local context = require("herdr_feedback.context")
 local M = {}
 local CANCELLED = {}
+local LOCK_BUSY = {}
 local acquire_lock
 
 local ffi_ok, ffi = pcall(require, "ffi")
@@ -126,7 +127,13 @@ function M.update(review, callback, control)
   local path, root = M.path(review)
   if not path then return nil, root end
   local lock, lock_error = acquire_lock(path)
-  if not lock then return nil, lock_error end
+  if not lock then
+    if lock_error == LOCK_BUSY then
+      if cancelled(control) then return nil, CANCELLED end
+      return nil, "Review state is busy; try again"
+    end
+    return nil, lock_error
+  end
   local ok, succeeded, value, failure = xpcall(function()
     if cancelled(control) then return false, nil, CANCELLED end
     local comments, read_error = read_path(path, root)
@@ -142,8 +149,9 @@ function M.update(review, callback, control)
   end, debug.traceback)
   local closed = close_file(lock)
   if not ok then
-    if not closed then return nil, value .. "; additionally could not release review-state lock" end
-    return nil, value
+    local transaction_error = tostring(succeeded)
+    if not closed then return nil, transaction_error .. "; additionally could not release review-state lock" end
+    return nil, transaction_error
   end
   if not succeeded then
     if not closed and failure ~= CANCELLED then return nil, tostring(failure) .. "; additionally could not release review-state lock" end
@@ -184,7 +192,7 @@ acquire_lock = function(path)
     vim.wait(10)
   until vim.uv.hrtime() >= deadline
   close_file(file)
-  return nil, "Review state is busy; try again"
+  return nil, LOCK_BUSY
 end
 
 function M.read(review)
