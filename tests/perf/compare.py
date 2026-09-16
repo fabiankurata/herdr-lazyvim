@@ -95,6 +95,153 @@ def comment_operation_metrics(observed, count):
     return metrics
 
 
+def package_extraction_metrics(observed):
+    """Validate the PR02 legacy fixture and expose its like-for-like timings."""
+    required = ("module_setup_ms", "sequential_crud_ms", "export_ms",
+                "old_format_store_access_ms")
+    byte_fields = ("old_store_bytes", "old_store_after_access_bytes",
+                   "final_store_bytes", "export_payload")
+    if observed.get("status") != "PASS":
+        raise ValueError("package extraction fixture did not complete its public flow")
+    if observed.get("export_entrypoint") != "herdr_review.send":
+        raise ValueError("package extraction fixture did not use the legacy public export path")
+    if observed.get("old_store_bytes") == observed.get("old_store_after_access_bytes"):
+        raise ValueError("old-format store access did not exercise legacy normalization")
+    for key in byte_fields:
+        if not isinstance(observed.get(key), str):
+            raise ValueError("package extraction fixture omitted literal " + key)
+    metrics = {}
+    for key in required:
+        value = observed.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("invalid package extraction metric: " + key)
+        metrics[key] = value
+    return metrics
+
+
+def package_extraction_pair(sources, runtime, artifact, order):
+    """Run both exact-source arms in one Neovim VM for each AB/BA pair."""
+    result_path = runtime.root / "package-extraction-pair.json"
+    fixture = artifact.parent / "fixture-roots" / artifact.name
+    env = runtime.env | {
+        "HARNESS": str(HARNESS), "FIXTURE_ROOT": str(fixture),
+        "HERDR_TEST_STATE_ROOT": str(runtime.root / "state"),
+        "OPERATION_RESULT": str(result_path), "PAIR_ORDER": ",".join(order),
+        "PACKAGE_EXTRACTION_LIBRARY": "1",
+        "BASELINE_SOURCE_REPO": str(sources["baseline"]),
+        "CANDIDATE_SOURCE_REPO": str(sources["candidate"]),
+    }
+    completed = runtime.execute([
+        "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l",
+        str(HARNESS / "tests/nvim/package_extraction_pair.lua"),
+    ], env=env, check=False, timeout=20)
+    (artifact / "stdout.txt").write_text(completed.stdout)
+    (artifact / "stderr.txt").write_text(completed.stderr)
+    if completed.returncode != 0 or not result_path.exists():
+        return {"status": "FAIL", "exit_code": completed.returncode, "arms": {}}
+    observed = json.loads(result_path.read_text())
+    (artifact / "fixture-result.json").write_text(json.dumps(observed, indent=2) + "\n")
+    if observed.get("status") != "PASS" or observed.get("order") != ",".join(order):
+        raise ValueError("same-VM package extraction fixture did not complete its requested pair")
+    arms = observed.get("arms")
+    if not isinstance(arms, dict) or set(arms) != {"baseline", "candidate"}:
+        raise ValueError("same-VM package extraction fixture omitted an arm")
+    return {"status": "PASS", "arms": {
+        side: {"status": "PASS", "metrics": package_extraction_metrics(arms[side]),
+               "behavior": {key: arms[side][key] for key in (
+                   "old_store_bytes", "old_store_after_access_bytes",
+                   "final_store_bytes", "export_payload",
+               )}}
+        for side in ("baseline", "candidate")
+    }, "reset_boundary": observed.get("reset_boundary")}
+
+
+def run_package_extraction_pairs(repo, baseline, candidate, samples, artifact):
+    """Keep source arms in one VM while preserving AB/BA observation order."""
+    observations = []
+    with source_archive(repo, baseline) as (base_source, base_info):
+        with source_archive(repo, candidate) as (head_source, head_info):
+            sources = {"baseline": (base_source, base_info), "candidate": (head_source, head_info)}
+            write_json(artifact / "sources.json", {side: info for side, (_, info) in sources.items()})
+            for index in range(samples):
+                order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
+                sample = new_artifact(artifact / f"sample-{index:03d}-pair")
+                runtime = OwnedSession(sample, real=False, disable_update_checks=True)
+                ownership_failure = None
+                try:
+                    with runtime:
+                        measured = package_extraction_pair(
+                            {side: source for side, (source, _) in sources.items()}, runtime, sample, order)
+                    if measured["status"] != "PASS":
+                        raise RuntimeError("same-VM package extraction fixture failed")
+                    for position, side in enumerate(order):
+                        info = sources[side][1]
+                        arm = measured["arms"][side]
+                        observations.append({"index": index, "order": len(observations), "pair_order": list(order),
+                                             "same_vm_pair": True, "pair_position": position, "side": side,
+                                             **info, **arm})
+                except OwnershipError as exc:
+                    error = exception_evidence(exc)
+                    ownership_failure = exc
+                    for position, side in enumerate(order):
+                        info = sources[side][1]
+                        observations.append({"index": index, "order": len(observations), "pair_order": list(order),
+                                             "same_vm_pair": True, "pair_position": position, "side": side,
+                                             **info, "status": "FAIL", **error})
+                except Exception as exc:
+                    error = exception_evidence(exc)
+                    for position, side in enumerate(order):
+                        info = sources[side][1]
+                        observations.append({"index": index, "order": len(observations), "pair_order": list(order),
+                                             "same_vm_pair": True, "pair_position": position, "side": side,
+                                             **info, "status": "FAIL", **error})
+                write_json(sample / "result.json", {"observations": observations[-2:]})
+                write_json(artifact / "observations.json", observations)
+                if ownership_failure is not None:
+                    write_json(artifact / "sources.json", {side: info for side, (_, info) in sources.items()})
+                    raise ownership_failure
+            write_json(artifact / "sources.json", {side: info for side, (_, info) in sources.items()})
+    return observations
+
+
+def package_extraction_equivalence(observations):
+    """Compare literal outputs for each interleaved PR02 baseline/candidate pair."""
+    fields = ("old_store_bytes", "old_store_after_access_bytes",
+              "final_store_bytes", "export_payload")
+    pairs = {}
+    for observation in observations:
+        pairs.setdefault(observation["index"], {})[observation["side"]] = observation
+    mismatches = []
+    for index, pair in sorted(pairs.items()):
+        if set(pair) != {"baseline", "candidate"}:
+            mismatches.append({"index": index, "reason": "missing comparison arm"})
+            continue
+        if pair["baseline"].get("status") != "PASS" or pair["candidate"].get("status") != "PASS":
+            continue
+        different = [field for field in fields if pair["baseline"].get("behavior", {}).get(field) != pair["candidate"].get("behavior", {}).get(field)]
+        if different:
+            mismatches.append({"index": index, "fields": different})
+    return mismatches
+
+
+def package_extraction_regressions(measured):
+    """Apply the PR02 p95 budget to equivalent successful operations."""
+    baseline = measured["baseline"]["metrics"]
+    candidate = measured["candidate"]["metrics"]
+    regressions = []
+    for name in ("module_setup_ms", "sequential_crud_ms", "export_ms", "old_format_store_access_ms"):
+        if name not in baseline or name not in candidate:
+            regressions.append({"metric": name, "reason": "missing successful p95"})
+            continue
+        baseline_p95 = baseline[name]["p95"]
+        candidate_p95 = candidate[name]["p95"]
+        budget = baseline_p95 * 1.25 + 20
+        if candidate_p95 > budget:
+            regressions.append({"metric": name, "baseline_p95": baseline_p95,
+                                "candidate_p95": candidate_p95, "budget": budget})
+    return regressions
+
+
 def summary(observations, label):
     selected = [item for item in observations if item["side"] == label]
     passed = [item for item in selected if item["status"] == "PASS"]
@@ -196,7 +343,7 @@ def main():
             )
             print(artifact / "result.json")
             return {"PASS": 0, "FAIL": 1, "UNVERIFIED": 2}[result["status"]]
-        if args.scenario not in {"shell-open", "comment-operations"}:
+        if args.scenario not in {"shell-open", "comment-operations", "package-extraction"}:
             result["reason"] = "No integrated actual lifecycle workload. Use run_pairs with the prototype lifecycle callable. No unrelated workload was measured."
             write_json(artifact / "result.json", result)
             print(artifact / "result.json")
@@ -216,6 +363,31 @@ def main():
             write_json(artifact / "result.json", result)
             print(artifact / "result.json")
             return 1 if failures else 0
+        if args.scenario == "package-extraction":
+            result["workload"] = (
+                "legacy module setup plus public comment/list/edit/delete/send; records literal "
+                "old-format and resulting store bytes in one Neovim VM per pair"
+            )
+            result["order"] = "interleaved AB, BA pairs"
+            result["uuid_control"] = "fixture-local deterministic vim.uv.random sequence"
+            write_json(artifact / "result.json", result)
+            observations = run_package_extraction_pairs(HARNESS, args.baseline, args.candidate, args.samples, artifact)
+            result["observations"] = observations
+            result["measured"] = {side: summary(observations, side) for side in ("baseline", "candidate")}
+            result["literal_equivalence_mismatches"] = package_extraction_equivalence(observations)
+            result["p95_regressions"] = package_extraction_regressions(result["measured"])
+            failures = [item for item in observations if item["status"] != "PASS"]
+            result["status"] = "FAIL" if failures or result["literal_equivalence_mismatches"] or result["p95_regressions"] else "PASS"
+            result["package_extraction_status"] = result["status"]
+            first_baseline = next((item["behavior"] for item in observations
+                                   if item["side"] == "baseline" and item["status"] == "PASS"), None)
+            baseline_receipt = {"source": baseline, **result["measured"]["baseline"]}
+            if first_baseline is not None:
+                baseline_receipt["literal_behavior"] = first_baseline
+            write_json(artifact / "baseline.json", baseline_receipt)
+            write_json(artifact / "result.json", result)
+            print(artifact / "result.json")
+            return 1 if result["status"] == "FAIL" else 0
         result["workload"] = "shell dispatch open against evolving fake pane API; does not create a live editor"
         result["order"] = "interleaved AB, BA pairs"
         write_json(artifact / "result.json", result)

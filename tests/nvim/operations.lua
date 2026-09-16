@@ -40,6 +40,7 @@ vim.system = function(argv, _, callback)
     pending.send = callback
   elseif argv[2] == "agent" and argv[3] == "focus" then
     pending.focus = argv
+    if callback then vim.schedule(function() callback({ code = 0, stdout = "", stderr = "" }) end) end
   else
     error("unexpected fake command: " .. vim.inspect(argv))
   end

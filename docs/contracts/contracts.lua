@@ -137,7 +137,7 @@
 ---@field id string
 ---@field revision integer
 
----@class FeedbackTarget
+---@class FeedbackTarget # Bundled Herdr transport target shape.
 ---@field connection FeedbackConnectionKey
 ---@field workspace_id string
 ---@field tab_id string
@@ -145,15 +145,26 @@
 ---@field agent_session_id string
 ---@field worktree FeedbackWorktreeKey
 
+---@alias FeedbackTransportTarget table # Registered transports own their target shape.
+
 ---@class FeedbackDeliveryBatch
 ---@field api_version 1
 ---@field id string
 ---@field review FeedbackReviewKey
 ---@field members FeedbackBatchMember[]
 ---@field payload string
----@field target? FeedbackTarget
+---@field transport? string
+---@field target? FeedbackTarget|FeedbackTransportTarget
 ---@field submit boolean
 ---@field strict_session_guard boolean
+
+---@class FeedbackSendRequest
+---@field review FeedbackReviewKey
+---@field annotation_ids? string[]
+---@field transport? string
+---@field target? table
+---@field submit? boolean
+---@field strict_session_guard? boolean
 
 ---@class FeedbackReceipt
 ---@field schema_version 1
@@ -190,8 +201,8 @@
 ---@field navigate fun(request: table, done: FeedbackDone): FeedbackOperation
 
 ---@class FeedbackTransport
----@field list_targets fun(request: table, done: FeedbackDone): FeedbackOperation
----@field validate_target fun(request: table, done: FeedbackDone): FeedbackOperation
----@field deliver fun(request: table, done: FeedbackDone): FeedbackOperation
+---@field list_targets fun(request: table, done: FeedbackDone): FeedbackOperation # success value is { targets = { target } }
+---@field validate_target fun(request: table, done: FeedbackDone): FeedbackOperation # success value is the validated target
+---@field deliver fun(request: table, done: FeedbackDone): FeedbackOperation # success value is { outcome = 'delivered_to_input' }
 
 return {}

@@ -65,12 +65,15 @@ cleanup policy requires separate concurrent-reader evidence.
 ## Delivery and completion
 
 `delivery-v1.json` fixes batch membership and source payload before target
-selection. Selected targets contain the explicit connection, workspace/tab,
-pane, and observed agent session identity. The Herdr transport validates the
-occupant immediately before input delivery. If server-side conditional
-session delivery is unavailable, `strict_session_guard=true` fails with
-`unsupported_capability` before sending bytes. The default preflight check
-has a remaining race before the server accepts input.
+selection. `send` uses the bundled Herdr transport unless its optional
+`transport` is a nonempty registered name. A selected transport receives the
+immutable exported batch and can supply its own target shape. Selected Herdr
+targets contain the explicit connection, workspace/tab, pane, and observed
+agent session identity. The Herdr transport validates the occupant immediately
+before input delivery. If server-side conditional session delivery is
+unavailable, `strict_session_guard=true` fails with `unsupported_capability`
+before sending bytes. The default preflight check has a remaining race before
+the server accepts input.
 
 All public operations that perform I/O accept a final `done(result)` callback
 and return an operation handle with `cancel()`. Completion is scheduled on
@@ -114,6 +117,7 @@ local operation = feedback.send({ review = review_key, annotation_ids = { id }, 
 operation.cancel()
 feedback.register_source_adapter("example", adapter)
 feedback.register_transport("capture", transport)
+feedback.send({ review = review_key, annotation_ids = { id }, transport = "capture" }, done)
 ```
 
 `add` resolves the buffer's review once at invocation. Calls using existing
@@ -135,11 +139,20 @@ boundary. The ordinary-file adapter remains usable if Diffview fails.
 
 A Transport implements `list_targets(request, done)`,
 `validate_target(request, done)`, and `deliver(request, done)`. Each returns
-an operation handle. Requests include explicit connection/review context.
-Deliver receives the immutable batch, validated target, submit option, and
-strict-session-guard option. It returns the delivery outcome. Discovery
-happens once per operation; final validation does not rediscover all agents.
-The synthetic capture example records payload bytes without invoking a model.
+an operation handle and completes once with a structured result.
+`list_targets` succeeds with `{ targets = { target } }`; an omitted request
+target requires exactly one discovered target, while a supplied target must be
+among that list. `validate_target` succeeds with the validated target. Deliver
+receives copied immutable batch and target values plus submit and
+strict-session-guard options; it succeeds only with
+`{ outcome = "delivered_to_input" }`. Malformed extension results are rejected
+at the boundary. The package acknowledges only the captured ID/revision
+members after that outcome. Cancellation before deliver returns `cancelled`.
+Once deliver starts, a cancelled, failed, or malformed completion is
+`uncertain` and retains drafts; only the confirmed outcome acknowledges them.
+Discovery happens once per operation; final validation does not rediscover all
+agents. The synthetic capture example records payload bytes without invoking a
+model.
 
 ## Controller behavior
 

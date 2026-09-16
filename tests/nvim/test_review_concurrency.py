@@ -74,6 +74,13 @@ class ReviewConcurrencyTests(unittest.TestCase):
         ], cwd=REPO, env=self.lock_environment(root, name, shared_state, control, role, scenario),
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
+    def start_cancellation_worker(self, root, name, shared_state, control, role):
+        environment = self.environment(root, name, shared_state, control, role)
+        environment["HERDR_NVIM_TEST_SCRIPT"] = str(HERE / "review_cancellation_worker.lua")
+        return subprocess.Popen([
+            "nvim", "--headless", "-u", "NONE", "-i", "NONE", "-l", str(HERE / "run_test.lua"),
+        ], cwd=REPO, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
     def finish_worker(self, process, label, expected=0):
         stdout, stderr = process.communicate(timeout=10)
         self.assertEqual(process.returncode, expected, f"{label}:\nstdout:\n{stdout}\nstderr:\n{stderr}")
@@ -276,6 +283,43 @@ class ReviewConcurrencyTests(unittest.TestCase):
             persisted = json.loads(state_path.read_text())
             self.assertEqual(sorted(item["text"] for item in persisted["comments"]),
                              ["abandoned update", "recovery update"])
+
+    def test_cancellation_during_kernel_lock_wait_does_not_commit(self):
+        with tempfile.TemporaryDirectory(prefix="herdr-review-cancel-", dir="/tmp") as temporary:
+            root = Path(temporary)
+            canonical, shared_state, state_path, control = self.fixture(root)
+            state_path.write_text(json.dumps({
+                "version": 1, "root": str(canonical), "comments": [{
+                    "id": IDENTITY, "revision": 1, "file": "example.lua", "start": 1,
+                    "finish": 1, "lines": "source", "text": "committed base",
+                }],
+            }) + "\n")
+            original = state_path.read_bytes()
+            holder = self.start_cancellation_worker(root, "holder", shared_state, control, "holder")
+            cancelled = writer = None
+            try:
+                self.wait_for(control / "holder-locked", holder)
+                cancelled = self.start_cancellation_worker(root, "cancelled", shared_state, control, "cancelled")
+                self.wait_for(control / "cancel-issued", cancelled)
+                self.wait_for(control / "cancelled-done", cancelled)
+                self.assertEqual(state_path.read_bytes(), original, "cancelled contender wrote while holder had the lock")
+                self.assertEqual(json.loads((control / "cancelled-result.json").read_text()),
+                                 {"callbacks": 1, "code": "cancelled"})
+                (control / "release-holder").write_text("release\n")
+                self.finish_worker(holder, "lock holder")
+                self.finish_worker(cancelled, "cancelled public mutation")
+                persisted = json.loads(state_path.read_text())
+                self.assertEqual([item["text"] for item in persisted["comments"]],
+                                 ["committed base", "holder mutation"])
+                writer = self.start_cancellation_worker(root, "writer", shared_state, control, "writer")
+                self.finish_worker(writer, "subsequent writer")
+                persisted = json.loads(state_path.read_text())
+                self.assertEqual([item["text"] for item in persisted["comments"]],
+                                 ["committed base", "holder mutation", "subsequent mutation"])
+            finally:
+                for process in (holder, cancelled, writer):
+                    if process is not None and process.poll() is None:
+                        self.stop_worker(process)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,482 @@
+-- Regression coverage for PR #2 lifecycle corrections. The fixture uses the
+-- real package and synthetic child-process callbacks only.
+local repo = assert(vim.env.HERDR_TEST_REPO)
+local state_root = assert(vim.env.HERDR_TEST_STATE_ROOT)
+vim.opt.runtimepath:prepend(repo .. "/nvim")
+
+local function wait_for(predicate, message)
+  assert(vim.wait(1000, predicate, 5), message)
+end
+
+local function review(root)
+  return {
+    worktree = { authority = { host = vim.uv.os_gethostname() or "localhost", path_authority = "local" }, canonical_root = root },
+    review_id = "draft",
+  }
+end
+
+local function state_path(root)
+  return vim.fn.stdpath("state") .. "/herdr-review/" .. vim.fn.sha256(root):sub(1, 16) .. ".json"
+end
+
+local function bytes(root)
+  local path = state_path(root)
+  return vim.fn.filereadable(path) == 1 and table.concat(vim.fn.readfile(path), "\n") or nil
+end
+
+local root = state_root .. "/review-corrections"
+vim.fn.mkdir(root .. "/.git", "p")
+vim.fn.writefile({ "first", "second" }, root .. "/example.lua")
+root = assert(vim.uv.fs_realpath(root))
+vim.cmd("edit " .. vim.fn.fnameescape(root .. "/example.lua"))
+local feedback = require("herdr_feedback")
+
+local function call(invoke, message)
+  local result, callbacks
+  callbacks = 0
+  local handle = invoke(function(value) callbacks = callbacks + 1; result = value end)
+  assert(type(handle) == "table" and type(handle.cancel) == "function", message .. " returns a handle")
+  wait_for(function() return result ~= nil end, message .. " completes")
+  vim.wait(20)
+  assert(callbacks == 1, message .. " completes exactly once")
+  return result, handle
+end
+
+-- F5: text belongs to the invocation, not the mutable caller table.
+for _, replacement in ipairs({ "replacement", vim.NIL, 42 }) do
+  local request = { bufnr = vim.api.nvim_get_current_buf(), range = { start_line = 1, end_line = 1 }, text = "captured comment" }
+  local result
+  local callbacks = 0
+  feedback.add(request, function(value) callbacks = callbacks + 1; result = value end)
+  request.text = replacement == vim.NIL and nil or replacement
+  wait_for(function() return result ~= nil end, "mutable add completes")
+  assert(callbacks == 1 and result.ok and result.value.text == "captured comment", "add snapshots validated text")
+end
+
+-- A cancellation after the durable commit completed cannot relabel it.
+do
+  local result, callbacks
+  callbacks = 0
+  local operation = feedback.add({ bufnr = vim.api.nvim_get_current_buf(), range = { start_line = 1, end_line = 1 }, text = "committed before cancel" }, function(value)
+    callbacks = callbacks + 1
+    result = value
+  end)
+  wait_for(function() return result ~= nil end, "committed add completes")
+  local committed_bytes = bytes(root)
+  operation.cancel()
+  vim.wait(30)
+  assert(callbacks == 1 and result.ok and bytes(root) == committed_bytes, "late cancellation does not relabel a commit")
+end
+
+-- F6: the documented gutter option remains valid through both boundaries.
+assert(require("herdr_feedback.legacy").validate_setup({ comment_range_style = "gutter" }), "legacy accepts gutter")
+vim.g.mapleader = " "
+vim.keymap.set("n", "<leader>rc", "<cmd>echo 'custom'<CR>")
+local setup = feedback.setup({ comment_range_style = "gutter", keymaps = true })
+assert(setup.ok, "public setup accepts gutter")
+assert(vim.fn.maparg("<leader>rc", "n"):find("custom", 1, true), "gutter setup preserves user mappings")
+assert(feedback.setup({ comment_range_style = "gutter" }).value.already_configured, "gutter setup is idempotent")
+assert(not feedback.setup({ comment_range_style = "not-a-style" }).ok, "invalid styles remain rejected")
+vim.cmd("doautocmd BufEnter")
+local marks = vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_get_namespaces().herdr_review, 0, -1, { details = true })
+assert(#marks > 0 and marks[1][4].sign_text and not marks[1][4].hl_group and not marks[1][4].line_hl_group,
+  "gutter rendering has a sign without a range tint")
+
+local listed = call(function(done) return feedback.list({ review = review(root) }, done) end, "list before transport")
+assert(listed.ok and #listed.value == 4, "fixture drafts persist")
+
+-- F1: a retained list callback cannot revive an operation whose method returned
+-- an invalid handle. The recorder proves validation, delivery, and ack never run.
+local retained, stages = nil, {}
+local transport = {
+  list_targets = function(_, done) stages[#stages + 1] = "list"; retained = done; return {} end,
+  validate_target = function(_, _) stages[#stages + 1] = "validate"; return { cancel = function() end } end,
+  deliver = function(_, _) stages[#stages + 1] = "deliver"; return { cancel = function() end } end,
+}
+assert(feedback.register_transport("late-invalid-handle", transport).ok)
+local before = bytes(root)
+local terminal = call(function(done) return feedback.send({ review = review(root), transport = "late-invalid-handle" }, done) end, "invalid transport handle")
+assert(not terminal.ok and terminal.error.code == "invalid_state", "invalid list handle is terminal")
+retained({ ok = true, value = { targets = { { name = "late" } } } })
+vim.wait(50)
+assert(vim.deep_equal(stages, { "list" }), "late list callback has no later side effects")
+assert(bytes(root) == before, "late list callback does not acknowledge drafts")
+
+-- Other callback/return orderings share the same terminal-stage invariant.
+for name, list_targets in pairs({
+  ["callback-then-throw"] = function(done)
+    done({ ok = true, value = { targets = { { name = "late" } } } })
+    error("controlled list throw")
+  end,
+  ["sync-callback-invalid-handle"] = function(done)
+    done({ ok = true, value = { targets = { { name = "late" } } } })
+    return {}
+  end,
+}) do
+  local order = {}
+  assert(feedback.register_transport(name, {
+    list_targets = function(_, done) order[#order + 1] = "list"; return list_targets(done) end,
+    validate_target = function() order[#order + 1] = "validate"; return { cancel = function() end } end,
+    deliver = function() order[#order + 1] = "deliver"; return { cancel = function() end } end,
+  }).ok)
+  local value = call(function(done) return feedback.send({ review = review(root), transport = name }, done) end, name)
+  assert(not value.ok and value.error.code == "invalid_state", name .. " is terminal")
+  vim.wait(30)
+  assert(vim.deep_equal(order, { "list" }), name .. " cannot start later stages")
+end
+
+-- Duplicate and late callbacks after cancellation must remain inert.
+local cancel_callback, cancel_stages = nil, {}
+assert(feedback.register_transport("late-cancel", {
+  list_targets = function(_, done) cancel_stages[#cancel_stages + 1] = "list"; cancel_callback = done; return { cancel = function() end } end,
+  validate_target = function() cancel_stages[#cancel_stages + 1] = "validate"; return { cancel = function() end } end,
+  deliver = function() cancel_stages[#cancel_stages + 1] = "deliver"; return { cancel = function() end } end,
+}).ok)
+local cancelled, cancelled_calls = nil, 0
+local cancel_handle = feedback.send({ review = review(root), transport = "late-cancel" }, function(value) cancelled_calls = cancelled_calls + 1; cancelled = value end)
+wait_for(function() return cancel_callback ~= nil end, "cancellable list starts")
+cancel_handle.cancel()
+cancel_callback({ ok = true, value = { targets = { { name = "late" } } } })
+cancel_callback({ ok = true, value = { targets = { { name = "late" } } } })
+wait_for(function() return cancelled ~= nil end, "cancelled list completes")
+assert(cancelled_calls == 1 and not cancelled.ok and cancelled.error.code == "cancelled", "cancellation completes once")
+assert(vim.deep_equal(cancel_stages, { "list" }), "late cancelled callbacks have no side effects")
+
+-- Cancellation may run from an extension before that extension has returned a
+-- handle. A later valid return must not revive the terminal stage.
+local operations = require("herdr_feedback.operations")
+local scheduled, in_method_operation = operations.scheduled, nil
+operations.scheduled = function(done, work)
+  local operation, state, finish = scheduled(done, work)
+  in_method_operation = operation
+  return operation, state, finish
+end
+local returning_stages = {}
+assert(feedback.register_transport("cancel-before-handle", {
+  list_targets = function(_, _)
+    returning_stages[#returning_stages + 1] = "list"
+    in_method_operation.cancel()
+    return { cancel = function() end }
+  end,
+  validate_target = function() returning_stages[#returning_stages + 1] = "validate"; return { cancel = function() end } end,
+  deliver = function() returning_stages[#returning_stages + 1] = "deliver"; return { cancel = function() end } end,
+}).ok)
+local returning = call(function(done) return feedback.send({ review = review(root), transport = "cancel-before-handle" }, done) end, "cancel before returned handle")
+operations.scheduled = scheduled
+assert(not returning.ok and returning.error.code == "cancelled" and vim.deep_equal(returning_stages, { "list" }),
+  "cancellation during extension return leaves the stage terminal: " .. vim.inspect(returning) .. " " .. vim.inspect(returning_stages))
+
+-- A confirmed registered delivery remains delivered when acknowledgement code
+-- throws after the delivery boundary.
+local original_acknowledge = operations.acknowledge
+operations.acknowledge = function() error("controlled acknowledgement throw") end
+local acknowledged_transport = {
+  list_targets = function(_, done) done({ ok = true, value = { targets = { { name = "target" } } } }); return { cancel = function() end } end,
+  validate_target = function(_, done) done({ ok = true, value = { name = "target" } }); return { cancel = function() end } end,
+  deliver = function(_, done) done({ ok = true, value = { outcome = "delivered_to_input" } }); return { cancel = function() end } end,
+}
+assert(feedback.register_transport("acknowledgement-throw", acknowledged_transport).ok)
+local acknowledged = call(function(done) return feedback.send({ review = review(root), transport = "acknowledgement-throw" }, done) end, "acknowledgement throw")
+operations.acknowledge = original_acknowledge
+assert(acknowledged.ok and acknowledged.value.outcome == "delivered_to_input" and acknowledged.value.warning,
+  "acknowledgement throw retains confirmed delivery")
+
+-- F4: a package exception produces one structured completion rather than
+-- escaping the scheduler and abandoning the caller.
+local completion = require("herdr_feedback.completion")
+local thrown = call(function(done)
+  return completion.scheduled(done, function() error("controlled scheduled failure") end)
+end, "scheduled exception")
+assert(not thrown.ok and thrown.error.code == "failed", "scheduled exception is structured")
+
+-- F4: a throw after a kernel lock is held releases it. The next transaction
+-- must acquire the same lock and write successfully.
+local store = require("herdr_feedback.store")
+local direct, direct_error = store.update(review(root), function()
+  error("controlled direct transaction failure")
+end)
+assert(direct == nil and type(direct_error) == "string" and direct_error:find("controlled direct transaction failure", 1, true),
+  "direct transaction exception retains its original error")
+local direct_recovered, direct_recovered_error = store.update(review(root), function(records) return records, true end)
+assert(direct_recovered and not direct_recovered_error, "writer after direct transaction exception acquires released lock")
+
+local original_random = vim.uv.random
+local first = store.update(review(root), function(records)
+  vim.uv.random = function() error("controlled temporary identity failure") end
+  return records, true
+end)
+vim.uv.random = original_random
+assert(first == nil, "thrown transaction reports failure")
+local second, second_error = store.update(review(root), function(records) return records, true end)
+assert(second and not second_error, "writer after thrown transaction acquires released lock")
+
+-- The public annotation-ID path also reports the underlying failure once and
+-- leaves the durable draft unchanged.
+local annotation_before = bytes(root)
+local annotation_result, annotation_calls = nil, 0
+vim.uv.random = function() error("controlled annotation-id failure") end
+feedback.add({ bufnr = vim.api.nvim_get_current_buf(), range = { start_line = 1, end_line = 1 }, text = "annotation id failure" }, function(value)
+  annotation_calls = annotation_calls + 1
+  annotation_result = value
+end)
+wait_for(function() return annotation_result ~= nil end, "annotation-ID failure completes")
+vim.uv.random = original_random
+assert(annotation_calls == 1 and not annotation_result.ok and annotation_result.error.code == "write_failed"
+    and annotation_result.error.message:find("controlled annotation-id failure", 1, true) and bytes(root) == annotation_before,
+  "annotation-ID exception retains its original error without writing")
+local annotation_recovered, annotation_recovered_error = store.update(review(root), function(records) return records, true end)
+assert(annotation_recovered and not annotation_recovered_error, "writer after annotation-ID exception acquires released lock")
+
+-- Retain a primary transaction exception when lock cleanup also reports a
+-- failure, while still proving the next writer owns a released descriptor.
+local original_open, original_close = vim.uv.fs_open, vim.uv.fs_close
+local lock_descriptor
+vim.uv.fs_open = function(path, flags, mode, callback)
+  local file, message, code = original_open(path, flags, mode, callback)
+  if not callback and file and path:find(".lock-v2", 1, true) then lock_descriptor = file end
+  return file, message, code
+end
+vim.uv.fs_close = function(file, callback)
+  if not callback and file == lock_descriptor then original_close(file); return nil, "controlled cleanup failure" end
+  return original_close(file, callback)
+end
+local primary, primary_error = store.update(review(root), function()
+  error("controlled primary direct failure")
+end)
+vim.uv.fs_open, vim.uv.fs_close = original_open, original_close
+assert(primary == nil and type(primary_error) == "string" and primary_error:find("controlled primary direct failure", 1, true)
+    and primary_error:find("additionally could not release", 1, true), "primary plus cleanup failure retains both contexts")
+local recovered, recovered_error = store.update(review(root), function(records) return records, true end)
+assert(recovered and not recovered_error, "writer after cleanup diagnostic acquires released lock")
+
+-- The same primary-plus-cleanup diagnostic survives the public annotation-ID
+-- path and does not abandon its scheduled completion.
+local public_cleanup_before, public_cleanup_result, public_cleanup_calls = bytes(root), nil, 0
+local public_cleanup_open, public_cleanup_close = vim.uv.fs_open, vim.uv.fs_close
+local public_cleanup_lock
+vim.uv.fs_open = function(path, flags, mode, callback)
+  local file, message, code = public_cleanup_open(path, flags, mode, callback)
+  if not callback and file and path:find(".lock-v2", 1, true) then public_cleanup_lock = file end
+  return file, message, code
+end
+vim.uv.fs_close = function(file, callback)
+  if not callback and file == public_cleanup_lock then
+    public_cleanup_close(file)
+    return nil, "controlled public cleanup failure"
+  end
+  return public_cleanup_close(file, callback)
+end
+vim.uv.random = function() error("controlled public annotation-id failure") end
+feedback.add({ bufnr = vim.api.nvim_get_current_buf(), range = { start_line = 1, end_line = 1 }, text = "annotation cleanup failure" }, function(value)
+  public_cleanup_calls = public_cleanup_calls + 1
+  public_cleanup_result = value
+end)
+wait_for(function() return public_cleanup_result ~= nil end, "public annotation-ID cleanup failure completes")
+vim.uv.random, vim.uv.fs_open, vim.uv.fs_close = original_random, public_cleanup_open, public_cleanup_close
+assert(public_cleanup_calls == 1 and not public_cleanup_result.ok and public_cleanup_result.error.code == "write_failed"
+    and public_cleanup_result.error.message:find("controlled public annotation-id failure", 1, true)
+    and public_cleanup_result.error.message:find("additionally could not release", 1, true)
+    and bytes(root) == public_cleanup_before,
+  "public annotation-ID cleanup failure retains both diagnostics without writing")
+local public_cleanup_recovered, public_cleanup_recovered_error = store.update(review(root), function(records) return records, true end)
+assert(public_cleanup_recovered and not public_cleanup_recovered_error, "writer after public annotation-ID cleanup failure acquires released lock")
+
+-- F4-A: valid JSON with an invalid target-preflight envelope is a structured
+-- pre-delivery refusal, not an uncaught scheduler error.
+local preflight_socket, preflight_bin = vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = "preflight-socket", "preflight-herdr"
+local preflight_target = {
+  connection = { authority = review(root).worktree.authority, socket = "preflight-socket" },
+  workspace_id = "workspace", tab_id = "tab", pane_id = "pane", agent_session_id = "agent", worktree = review(root).worktree,
+}
+for _, malformed_stdout in ipairs({ "7", vim.json.encode({ result = 7 }) }) do
+  local system, pending, input_attempts = vim.system, nil, 0
+  vim.system = function(argv, _, done)
+    if argv[2] == "agent" and argv[3] == "list" then pending = done
+    elseif argv[2] == "pane" and argv[3] == "send-text" then input_attempts = input_attempts + 1
+    else error("unexpected explicit preflight child") end
+    return {}
+  end
+  local preflight_before, preflight_result, preflight_calls = bytes(root), nil, 0
+  feedback.send({ review = review(root), target = preflight_target }, function(value)
+    preflight_calls = preflight_calls + 1
+    preflight_result = value
+  end)
+  wait_for(function() return pending ~= nil end, "malformed target preflight starts")
+  vim.v.errmsg = ""
+  pending({ code = 0, stdout = malformed_stdout, stderr = "" })
+  wait_for(function() return preflight_result ~= nil end, "malformed target preflight completes")
+  vim.wait(20)
+  vim.system = system
+  assert(preflight_calls == 1 and not preflight_result.ok and preflight_result.error.code == "invalid_state"
+      and input_attempts == 0 and bytes(root) == preflight_before and vim.v.errmsg == "",
+    "malformed target preflight is terminal without scheduler error")
+end
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = preflight_socket, preflight_bin
+
+-- A missing bundled executable is a definite startup failure, not a lost done.
+local original_socket, original_bin = vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH
+vim.env.HERDR_SOCKET_PATH = "missing-socket"
+vim.env.HERDR_BIN_PATH = state_root .. "/does-not-exist-herdr"
+local missing_target = {
+  connection = { authority = review(root).worktree.authority, socket = "missing-socket" },
+  workspace_id = "workspace", tab_id = "tab", pane_id = "pane", agent_session_id = "agent", worktree = review(root).worktree,
+}
+local missing_before = bytes(root)
+local missing = call(function(done) return feedback.send({ review = review(root), target = missing_target }, done) end, "missing executable")
+assert(not missing.ok and missing.error.code == "failed" and bytes(root) == missing_before,
+  "unstartable bundled executable is structured and retains drafts")
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = original_socket, original_bin
+
+-- A normalization commit during initial reading is not the end of a send
+-- operation: cancellation while bundled discovery waits must still win before
+-- input. The normalized draft remains durable for a later attempt.
+local normalization_root = state_root .. "/normalization-cancel"
+vim.fn.mkdir(normalization_root .. "/.git", "p")
+vim.fn.writefile({ "source" }, normalization_root .. "/example.lua")
+normalization_root = assert(vim.uv.fs_realpath(normalization_root))
+vim.fn.mkdir(vim.fn.stdpath("state") .. "/herdr-review", "p")
+vim.fn.writefile({ vim.json.encode({ version = 1, root = normalization_root, comments = {
+  { file = "example.lua", start = 1, finish = 1, lines = "source", text = "old normalized draft" },
+} }) }, state_path(normalization_root))
+vim.env.HERDR_WORKSPACE_ID, vim.env.HERDR_PANE_ID = "normalization-workspace", "normalization-editor"
+local normalized_pending, normalized_input = {}, 0
+local normalized_system = vim.system
+local normalized_select = vim.ui.select
+vim.ui.select = function(items, _, done) done(items[1]) end
+vim.system = function(argv, _, done)
+  if argv[2] == "agent" and argv[3] == "list" then normalized_pending.agents = done
+  elseif argv[2] == "tab" and argv[3] == "list" then normalized_pending.tabs = done
+  elseif argv[2] == "pane" and argv[3] == "send-text" then normalized_input = normalized_input + 1
+  else error("unexpected normalized command") end
+  return {}
+end
+local normalized_result, normalized_callbacks = nil, 0
+local normalized_operation = feedback.send({ review = review(normalization_root) }, function(value)
+  normalized_callbacks = normalized_callbacks + 1
+  normalized_result = value
+end)
+wait_for(function() return normalized_pending.agents ~= nil end, "normalizing send begins discovery")
+normalized_operation.cancel()
+normalized_pending.agents({ code = 0, stdout = vim.json.encode({ result = { agents = {
+  { workspace_id = "normalization-workspace", pane_id = "agent-one", agent = "one" },
+  { workspace_id = "normalization-workspace", pane_id = "agent-two", agent = "two" },
+} } }), stderr = "" })
+wait_for(function() return normalized_result ~= nil end, "normalizing cancelled send completes")
+assert(normalized_callbacks == 1 and not normalized_result.ok and normalized_result.error.code == "cancelled"
+    and normalized_pending.tabs == nil and normalized_input == 0,
+  "cancelled discovery starts no tab lookup or delivery")
+local normalized_state = vim.json.decode(table.concat(vim.fn.readfile(state_path(normalization_root)), "\n"))
+assert(#normalized_state.comments == 1 and normalized_state.comments[1].id and normalized_state.comments[1].revision == 1
+    and normalized_state.comments[1].text == "old normalized draft", "cancelled normalization send retains its normalized draft")
+vim.system, vim.ui.select = normalized_system, normalized_select
+
+-- No-target bundled discovery must complete structurally when either child
+-- startup throws. The tab case executes in the scheduled continuation.
+for name, throw_at in pairs({ ["agent-list-startup"] = "agents", ["tab-list-startup"] = "tabs" }) do
+  local system = vim.system
+  vim.system = function(argv, _, done)
+    if argv[2] == "agent" and argv[3] == "list" then
+      if throw_at == "agents" then error("controlled agent-list startup failure") end
+      done({ code = 0, stdout = vim.json.encode({ result = { agents = {
+        { workspace_id = "normalization-workspace", pane_id = "agent-one", agent = "one" },
+        { workspace_id = "normalization-workspace", pane_id = "agent-two", agent = "two" },
+      } } }), stderr = "" })
+      return {}
+    end
+    if argv[2] == "tab" and argv[3] == "list" then error("controlled tab-list startup failure") end
+    error("unexpected discovery command")
+  end
+  local discovery = call(function(done) return feedback.send({ review = review(normalization_root) }, done) end, name)
+  vim.system = system
+  assert(not discovery.ok and discovery.error.code == "failed", name .. " is a structured pre-delivery failure")
+end
+
+-- F2 and F4: explicit target subprocesses retain the invocation executable and
+-- socket, and a post-delivery focus throw cannot lose confirmed completion.
+vim.env.HERDR_SOCKET_PATH = "socket-A"
+vim.env.HERDR_BIN_PATH = "herdr-A"
+vim.env.HERDR_RUNTIME_LEASE_TOKEN = "fixture-lease"
+local target = {
+  connection = { authority = review(root).worktree.authority, socket = "socket-A" },
+  workspace_id = "workspace", tab_id = "tab", pane_id = "pane", agent_session_id = "agent", worktree = review(root).worktree,
+}
+local command_calls, pending = {}, {}
+local old_system = vim.system
+vim.system = function(argv, options, done)
+  command_calls[#command_calls + 1] = { argv = vim.deepcopy(argv), options = vim.deepcopy(options) }
+  if argv[2] == "agent" and argv[3] == "list" then pending.preflight = done
+  elseif argv[2] == "pane" then pending.delivery = done
+  elseif argv[2] == "agent" and argv[3] == "focus" then pending.focus = done or true
+  else error("unexpected child") end
+  return {}
+end
+local sent, sent_callbacks
+sent_callbacks = 0
+feedback.send({ review = review(root), target = target }, function(value) sent_callbacks = sent_callbacks + 1; sent = value end)
+-- Change every relevant ambient selector before scheduled startup.
+vim.env.HERDR_SOCKET_PATH = "socket-B"; vim.env.HERDR_BIN_PATH = "herdr-B"; vim.env.HERDR_SESSION = "other"; vim.env.HERDR_CONFIG_PATH = "other-config"; vim.env.HERDR_SERVER_SESSION = "other-server"
+wait_for(function() return pending.preflight ~= nil end, "explicit preflight starts")
+local first_command = command_calls[1]
+assert(first_command.argv[1] == "herdr-A" and first_command.options.clear_env, "preflight captures executable and isolates environment")
+assert(first_command.options.env.HERDR_SOCKET_PATH == "socket-A" and first_command.options.env.HERDR_RUNTIME_LEASE_TOKEN == "fixture-lease", "preflight keeps captured socket and lease")
+assert(first_command.options.env.HERDR_SESSION == nil and first_command.options.env.HERDR_CONFIG_PATH == nil
+    and first_command.options.env.HERDR_SERVER_SESSION == nil, "preflight removes competing selectors")
+pending.preflight({ code = 0, stdout = vim.json.encode({ result = { agents = {
+  { workspace_id = "workspace", tab_id = "tab", pane_id = "pane", agent_session = { kind = "id", value = "agent" } },
+} } }), stderr = "" })
+vim.env.HERDR_SOCKET_PATH = "socket-C"; vim.env.HERDR_BIN_PATH = "herdr-C"; vim.env.HERDR_CLIENT_SOCKET_PATH = "competing"
+wait_for(function() return pending.delivery ~= nil end, "explicit delivery starts")
+assert(command_calls[2].argv[1] == "herdr-A" and command_calls[2].options.env.HERDR_SOCKET_PATH == "socket-A", "delivery uses captured route")
+assert(command_calls[2].options.env.HERDR_CLIENT_SOCKET_PATH == nil, "delivery removes competing routing selector")
+vim.env.HERDR_SOCKET_PATH = "socket-D"; vim.env.HERDR_BIN_PATH = "herdr-D"; vim.env.HERDR_SESSION = "third"
+pending.delivery({ code = 0, stdout = "", stderr = "" })
+wait_for(function() return pending.focus ~= nil end, "focus starts after delivery")
+if type(pending.focus) == "function" then pending.focus({ code = 1, stdout = "", stderr = "controlled focus failure" }) end
+wait_for(function() return sent ~= nil end, "focus failure still completes delivered operation")
+assert(sent_callbacks == 1 and sent.ok and sent.value.outcome == "delivered_to_input" and sent.value.warning, "focus failure retains confirmed delivery")
+assert(command_calls[3].argv[1] == "herdr-A" and command_calls[3].options.env.HERDR_SOCKET_PATH == "socket-A", "focus uses captured route")
+assert(command_calls[3].options.env.HERDR_SESSION == nil and command_calls[3].options.env.HERDR_SERVER_SESSION == nil, "focus removes competing selectors")
+vim.system = old_system
+
+-- A persistence exception after bundled input confirmation cannot abandon the
+-- public callback or reclassify input delivery. The draft remains for retry.
+local ack_root = state_root .. "/bundled-ack-throw"
+vim.fn.mkdir(ack_root .. "/.git", "p")
+vim.fn.writefile({ "source" }, ack_root .. "/example.lua")
+ack_root = assert(vim.uv.fs_realpath(ack_root))
+vim.fn.writefile({ vim.json.encode({ version = 1, root = ack_root, comments = {
+  { id = "00000000-0000-4000-8000-0000000000b1", revision = 1, file = "example.lua", start = 1, finish = 1, lines = "source", text = "retain after acknowledgement throw" },
+} }) }, state_path(ack_root))
+local ack_socket, ack_bin = vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = "ack-socket", "ack-herdr"
+local ack_target = {
+  connection = { authority = review(ack_root).worktree.authority, socket = "ack-socket" },
+  workspace_id = "ack-workspace", tab_id = "ack-tab", pane_id = "ack-pane", agent_session_id = "ack-agent", worktree = review(ack_root).worktree,
+}
+local ack_pending, ack_calls = {}, 0
+local ack_system, acknowledge = vim.system, operations.acknowledge
+vim.system = function(argv, _, done)
+  if argv[2] == "agent" and argv[3] == "list" then ack_pending.preflight = done
+  elseif argv[2] == "pane" then ack_pending.delivery = done
+  elseif argv[2] == "agent" and argv[3] == "focus" then vim.schedule(function() done({ code = 0, stdout = "", stderr = "" }) end) end
+  return {}
+end
+operations.acknowledge = function() error("controlled bundled acknowledgement throw") end
+local ack_result
+feedback.send({ review = review(ack_root), target = ack_target }, function(value) ack_calls = ack_calls + 1; ack_result = value end)
+wait_for(function() return ack_pending.preflight ~= nil end, "bundled acknowledgement preflight starts")
+ack_pending.preflight({ code = 0, stdout = vim.json.encode({ result = { agents = {
+  { workspace_id = "ack-workspace", tab_id = "ack-tab", pane_id = "ack-pane", agent_session = { kind = "id", value = "ack-agent" } },
+} } }), stderr = "" })
+wait_for(function() return ack_pending.delivery ~= nil end, "bundled acknowledgement delivery starts")
+ack_pending.delivery({ code = 0, stdout = "", stderr = "" })
+wait_for(function() return ack_result ~= nil end, "bundled acknowledgement throw completes")
+assert(ack_calls == 1 and ack_result.ok and ack_result.value.outcome == "delivered_to_input" and ack_result.value.warning
+    and vim.json.decode(table.concat(vim.fn.readfile(state_path(ack_root)), "\n")).comments[1].text == "retain after acknowledgement throw",
+  "bundled acknowledgement throw retains delivered outcome and draft")
+operations.acknowledge, vim.system = acknowledge, ack_system
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_BIN_PATH = ack_socket, ack_bin
+
+print("PR02 correction regressions: lifecycle, routing, snapshot, and gutter: ok")
+vim.cmd("qa!")
